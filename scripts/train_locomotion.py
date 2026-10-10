@@ -226,8 +226,13 @@ class CurriculumGateCallback(LinearScaffoldCallback):
     STREAK_GATE_STEPS = 500  # 10s at 0.02s/step
 
     def __init__(self, total_timesteps, end_frac=CALM_EPISODE_FRAC, window=200,
-                 post_trigger_relax_frac=0.15, **kwargs):
+                 post_trigger_relax_frac=0.15, fall_rate_gate=None, streak_gate_steps=None,
+                 **kwargs):
         super().__init__(total_timesteps, 1.0, end_frac, relax_frac=post_trigger_relax_frac, **kwargs)
+        if fall_rate_gate is not None:
+            self.FALL_RATE_GATE = fall_rate_gate
+        if streak_gate_steps is not None:
+            self.STREAK_GATE_STEPS = streak_gate_steps
         self._fall_recent = deque(maxlen=window)
         self._streak_recent = deque(maxlen=window)
         self._streak_running = None
@@ -321,6 +326,13 @@ def main():
                          help="HeightRewardScaffoldCallback target value")
     parser.add_argument("--height-relax-frac", type=float, default=0.6,
                          help="HeightRewardScaffoldCallback ramp fraction of --timesteps")
+    parser.add_argument("--curriculum-fall-gate", type=float, default=None,
+                         help="CurriculumGateCallback.FALL_RATE_GATE override -- loosen when "
+                              "phase 1 has plateaued below the strict 0.1 default and it's time "
+                              "to start mixing in harsh/collapse starts anyway")
+    parser.add_argument("--curriculum-streak-gate", type=float, default=None,
+                         help="CurriculumGateCallback.STREAK_GATE_STEPS override (pairs with "
+                              "--curriculum-fall-gate)")
     args = parser.parse_args()
 
     MODELS_DIR.mkdir(exist_ok=True)
@@ -354,7 +366,9 @@ def main():
                       VelocityAssistCallback(args.timesteps, already_relaxed=args.assist_already_relaxed)]
     if args.stand_only:
         callback_list.append(
-            CurriculumGateCallback(args.timesteps, already_relaxed=args.calm_already_relaxed))
+            CurriculumGateCallback(args.timesteps, already_relaxed=args.calm_already_relaxed,
+                                    fall_rate_gate=args.curriculum_fall_gate,
+                                    streak_gate_steps=args.curriculum_streak_gate))
         callback_list.append(
             HeightRewardScaffoldCallback(args.timesteps, start_scale=args.height_start_scale,
                                           end_scale=args.height_end_scale,
