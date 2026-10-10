@@ -168,7 +168,7 @@ BRACE_VZ_REF = 1.0             # m/s downward torso speed at which the fall gate
 # matching it to height/stand_streak's scale instead.
 KNEE_STRAIGHT_SCALE = 3.0
 
-# ---- torso upright, ungated (stand-only, 2026-10-09) ----
+# ---- torso upright (stand-only, 2026-10-09; gated by recovery_gate as of 2026-10-10) ----
 # root_ry (torso pitch) has no RL-controlled actuator of its own -- in combat it's held by an
 # always-on external PD (env.py BALANCE_KP/KD), which stand_only turns off entirely (docs
 # 10.5x: it's not a force a real body has). A real human doesn't have one either, though --
@@ -509,14 +509,26 @@ class LocomotionEnv(Fighter2DEnv):
         # this exact masking problem once and fixed it by using MIN instead of the average --
         # same fix here, since the whole point is both legs need to extend to actually raise
         # the torso.
+        # recovery_gate (2026-10-10): knee_straight/torso_upright were tuned and validated
+        # entirely during calm_frac=1.0 training (near-standing starts only), where "straighten
+        # the knees, stay upright" never conflicts with anything. Once harsh/collapse starts got
+        # mixed in (CurriculumGateCallback phase 2), the harsh-only gate measured at 8/100 vs.
+        # ~30% calm -- a real human getting up off the ground bends the knees to tuck the feet
+        # and pitches the torso forward/down to push up through hands/knees; both rewards were
+        # penalizing exactly that necessary intermediate posture on every single step, fighting
+        # the only known way to actually stand up from flat. Gated the same way recovery_reward
+        # (env.py) already was -- ramps 0 at the ground up to full strength at FALL_HEIGHT, so
+        # calm/already-standing behavior (the thing they were tuned against) is unaffected.
+        recovery_gate = min(1.0, max(0.0, self.data.xpos[self.a_torso_id][2] / FALL_HEIGHT))
         knee_min = min(self.data.qpos[self._knee_r_qpos], self.data.qpos[self._knee_l_qpos])
         knee_straight_min = min(1.0, max(0.0, (knee_min + np.deg2rad(140.0)) / np.deg2rad(140.0)))
-        knee_straight_reward = KNEE_STRAIGHT_SCALE * knee_straight_min if self._stand_only else 0.0
+        knee_straight_reward = (KNEE_STRAIGHT_SCALE * knee_straight_min * recovery_gate
+                                 if self._stand_only else 0.0)
         torso_upright_reward = 0.0
         if self._stand_only:
             a_ry = self.data.qpos[self.a_ry_qpos]
             upright_ratio = min(1.0, max(0.0, 1.0 - abs(a_ry) / TORSO_ANGLE_REF))
-            torso_upright_reward = TORSO_UPRIGHT_SCALE * upright_ratio ** 2
+            torso_upright_reward = TORSO_UPRIGHT_SCALE * upright_ratio ** 2 * recovery_gate
         com_reward = 0.0
         if self._stand_only:
             com_x = np.sum(self._a_masses * self.data.xipos[self._a_bodies, 0]) / self._a_masses.sum()
