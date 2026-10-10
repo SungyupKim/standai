@@ -519,7 +519,17 @@ class LocomotionEnv(Fighter2DEnv):
         # the only known way to actually stand up from flat. Gated the same way recovery_reward
         # (env.py) already was -- ramps 0 at the ground up to full strength at FALL_HEIGHT, so
         # calm/already-standing behavior (the thing they were tuned against) is unaffected.
-        recovery_gate = min(1.0, max(0.0, self.data.xpos[self.a_torso_id][2] / FALL_HEIGHT))
+        #
+        # First version used a pure linear ratio (torso_z / FALL_HEIGHT), which never actually
+        # reaches 0 -- a genuinely lying-flat torso still sits at ~0.21m (body thickness), giving
+        # ratio~0.30. Measured directly (same lying pose, knees swept bent->straight): straight
+        # still won on total reward (2.188 vs 1.785 bent) because knee_straight's residual
+        # (KNEE_STRAIGHT_SCALE * 0.30 ~= 0.9) outweighed RECOVERY_REWARD_SCALE's realized value
+        # (0.441) -- the softer gate wasn't soft enough to stop favoring "lie flat and extend"
+        # over "tuck and push". Hard-floored instead: zero below half of FALL_HEIGHT, linear
+        # ramp to full strength only in the top half -- a truly flat posture now gets exactly 0
+        # from these two terms, leaving recovery/height as the only signal while on the ground.
+        recovery_gate = min(1.0, max(0.0, (self.data.xpos[self.a_torso_id][2] / FALL_HEIGHT - 0.5) / 0.5))
         knee_min = min(self.data.qpos[self._knee_r_qpos], self.data.qpos[self._knee_l_qpos])
         knee_straight_min = min(1.0, max(0.0, (knee_min + np.deg2rad(140.0)) / np.deg2rad(140.0)))
         knee_straight_reward = (KNEE_STRAIGHT_SCALE * knee_straight_min * recovery_gate
