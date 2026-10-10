@@ -126,9 +126,17 @@ def gate_survival_rate_calm_only(ckpt_path):
     return _run_gate(env, model)
 
 
-def format_message(v, total, gate_rate, gate_ckpt, calm_gate_rate):
+def format_message(v, total, gate_rate, gate_ckpt, calm_gate_rate, baseline_steps=0):
     steps = v.get("total_timesteps", 0)
-    pct = 100 * steps / total if total else 0
+    # `total` (--total-timesteps) is train_locomotion.py's per-launch budget, i.e. "how many
+    # MORE steps to run" (SB3's reset_num_timesteps=False adds it to the model's already-
+    # cumulative count internally) -- but `steps` here is that absolute cumulative count, carried
+    # across every --init-from in the chain. Comparing them directly showed e.g. "91.6M / 60M
+    # (152%)" once enough warm-start legs had piled up. baseline_steps (the cumulative count
+    # when THIS notify process started watching) puts both sides on the same "this leg only"
+    # basis.
+    pct = 100 * (steps - baseline_steps) / total if total else 0
+    pct = max(0.0, min(100.0, pct))
     calm_frac = v.get("calm_frac")
     if calm_frac is None:
         stage_line = None
@@ -145,7 +153,7 @@ def format_message(v, total, gate_rate, gate_ckpt, calm_gate_rate):
 
     lines = [
         "[fightai] 서기 학습 경과",
-        f"{FIELDS['total_timesteps']}: {steps/1e6:.1f}M / {total/1e6:.0f}M ({pct:.0f}%)",
+        f"{FIELDS['total_timesteps']} (누적): {steps/1e6:.1f}M -- 이번 구간 +{total/1e6:.0f}M 중 {pct:.0f}%",
     ]
     if stage_line:
         lines.append(stage_line)
@@ -180,8 +188,18 @@ def main():
                               "'../checkpoints/autosave/ppo_stand_v6_strongankle_*_steps.zip'")
     parser.add_argument("--total-timesteps", type=float, required=True)
     parser.add_argument("--interval-minutes", type=float, default=30)
+    parser.add_argument("--baseline-steps", type=float, default=None,
+                         help="cumulative total_timesteps this launch's --timesteps budget is "
+                              "relative to (matches train_locomotion.py's --init-from "
+                              "reset_num_timesteps=False behavior) -- default: auto-detect from "
+                              "the log's current value when this script starts")
     args = parser.parse_args()
     log_path = pathlib.Path(args.log)
+
+    baseline_steps = args.baseline_steps
+    if baseline_steps is None:
+        v0 = latest_values(log_path)
+        baseline_steps = v0.get("total_timesteps", 0) if v0 else 0
 
     last_steps = None
     while True:
@@ -192,7 +210,8 @@ def main():
                 ckpt = latest_checkpoint(args.ckpt_glob)
                 gate_rate = gate_survival_rate(ckpt) if ckpt else None
                 calm_gate_rate = gate_survival_rate_calm_only(ckpt) if ckpt else None
-                send_message(format_message(v, args.total_timesteps, gate_rate, ckpt, calm_gate_rate))
+                send_message(format_message(v, args.total_timesteps, gate_rate, ckpt, calm_gate_rate,
+                                             baseline_steps))
                 print(f"[stand-notify] sent at {last_steps:.0f} steps "
                       f"(gate={gate_rate if gate_rate is not None else 'n/a'}, "
                       f"calm_gate={calm_gate_rate if calm_gate_rate is not None else 'n/a'})", flush=True)
@@ -201,7 +220,8 @@ def main():
                     ckpt = latest_checkpoint(args.ckpt_glob)
                     gate_rate = gate_survival_rate(ckpt) if ckpt else None
                     calm_gate_rate = gate_survival_rate_calm_only(ckpt) if ckpt else None
-                    send_message(format_message(v, args.total_timesteps, gate_rate, ckpt, calm_gate_rate)
+                    send_message(format_message(v, args.total_timesteps, gate_rate, ckpt, calm_gate_rate,
+                                                 baseline_steps)
                                  + "\n\n학습 완료 (모델 저장됨)")
                 print("[stand-notify] finished", flush=True)
                 return
