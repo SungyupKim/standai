@@ -8,13 +8,40 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-## Current status
+## Current status (2026-10-10)
 
-Fixed-seed, deterministic 3-second-survival gate (calm/near-standing starts): ~40% as of the last
-measurement, up from a flat 0% through roughly twenty earlier iterations. Still far from reliable;
-the curriculum is currently holding at 100% calm starts until a stricter performance gate
-(fall_rate ≤ 0.1, max streak ≥ 10s, sustained) is cleared before mixing in harsh/collapsed-posture
-starts.
+Fixed-seed, deterministic 3-second-survival gate, measured fresh at 55.3M steps into the current
+run (`v21`, started from scratch two days ago):
+
+- **Calm starts** (near-standing posture, N=100, deterministic): **~30–40%** survive 3 full
+  seconds — noisy run to run, trending up.
+- **Full distribution** (calm + harsh/collapsed starts mixed, N=100): **~17–23%**.
+- Training-log `fall_rate` has dropped from ~1.0 to ~0.55–0.75 over the run; `max_stand_streak`
+  (longest continuous stand within an episode) is up to 300–480 steps (6–10s), from ~20 at the
+  start.
+
+For most of this track's history the real gate sat at a flat **0%** — training-log metrics kept
+looking better while the thing actually being measured (stand up from a fixed seed, hold it for
+3 seconds, deterministic policy) never budged. Two things changed that:
+
+1. **Found two silent measurement bugs**: a stale module-level override that was quietly
+   overwriting a reward-scale tuning attempt, and a viewer script that had never actually been
+   passing `stand_only=True` — every manual "does this look right" check all night had secretly
+   been running with an assist force re-enabled that training doesn't get.
+2. **Abandoned a long chain of `--init-from` warm-started reward-constant changes and restarted
+   from scratch** with everything (body proportions, the full curriculum, current reward scales)
+   baked in from step 0. The suspicion was that five-plus sequential warm starts had destabilized
+   the value function. The scratch run (`v21`) hit its first non-zero real-gate result (5%) in
+   under 12M steps — the previous warm-started lineage took 33M+ steps to reach 1%. That result
+   held up as training continued, so the "too much accumulation" hypothesis looks correct, at
+   least in this instance.
+
+Curriculum is still holding at `calm_frac=1.0` (100% near-standing starts) — the performance gate
+to start mixing in harsh/collapsed starts (`fall_rate ≤ 0.1` and `max_stand_streak ≥ 500` steps,
+sustained over 200 episodes) hasn't been cleared yet. The physical capability was never in
+question: a direct `qfrc_bias` torque measurement at a hand-set standing pose shows it costs only
+1–5% of each joint's maximum output to hold a full standing posture. What's missing is still
+reward/curriculum design, not body capability.
 
 ## Setup
 
