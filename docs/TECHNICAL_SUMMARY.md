@@ -1,6 +1,6 @@
-# FightAI — Technical Summary (condensed, English)
+# standai — Technical Summary (condensed, English)
 
-*Full detailed history (Korean) lives in [`fightai_기술문서.md`](fightai_기술문서.md). This is a
+*Full detailed history (Korean) lives in [`stand_only_track.md`](stand_only_track.md). This is a
 shorter English companion covering the architecture and the key findings, not every iteration.*
 
 ## 1. What this is
@@ -109,12 +109,58 @@ the deterministic policy genuinely achieving the 3-second survival bar — **1/1
 non-zero result across the entire stand-only effort. Still far from solved, but the central
 open question — "is this even achievable?" — now has a direct, measured "yes."
 
+**A measurement bug retracted a conclusion.** Raising the knee-straightness reward appeared to
+have zero effect on actual knee angle — until it turned out the manual diagnostic script wasn't
+applying the knee-angle floor scaffold (−80° during calm episodes) that training actually used.
+Re-measured with the matching floor applied: single-episode torso height snapshots jumped from
+0.10–0.43 to 0.76–0.96. The "no effect" claim was wrong; the real fixed-seed gate result at that
+checkpoint was unaffected either way. A related bug was found the same night: the interactive
+viewer script had never actually been passing `stand_only=True`, so every manual "does this look
+right" check had secretly been running with the torso-pitch assist force re-enabled — easier
+conditions than what training (and the gate) ever sees.
+
+**The torso visibly tumbles — a missing control skill, not a missing actuator.** Torso pitch has
+no directly-driven actuator; combat relies on an always-on external PD that's deliberately zeroed
+for stand-only. Watching the (bug-fixed) viewer run unassisted showed the torso rotating freely
+with no resistance. Reasoned this is a learned-skill gap rather than a structural one — humans
+don't have a direct torso muscle either, they control trunk orientation indirectly through
+hip/ankle ground-reaction moments — and added an angle-based `torso_upright` reward using the
+existing action space.
+
+**Too much accumulated warm-starting, tested directly.** After five-plus sequential
+`--init-from` reward-constant changes chained together, the resulting policy's behavior looked
+qualitatively "off" in the viewer — raising a concern that repeated warm starts had destabilized
+PPO's value function. Rather than guess, abandoned the chain and restarted completely from
+scratch (run `v21`) with every currently-settled setting (body proportions, the full 70-dim
+observation space, the gated curriculum, all current reward scales) baked in from step 0. This
+doubled as a direct test of the accumulation hypothesis.
+
+**The scratch restart won, clearly.** `v21` reached its first non-zero gate result (5/100) in
+under 12M steps — the old warm-started lineage had taken 33M+ steps to reach 1/100. The lead held
+up as training continued: by 53–55M steps, `v21` was clearing **30–40%** on calm-start fixed-seed
+gates and **17–23%** on the full calm+harsh distribution. This doesn't overturn the "continue
+reward-constant changes via `--init-from`" rule from §2 outright — it looks more like that rule
+has a limit (somewhere under five sequential changes) rather than being wrong in general.
+
 ## 4. Where it stands now
 
 - Standing from an arbitrary posture, held for 3 full seconds, deterministic policy, fixed seeds:
-  **~1%** and climbing, up from a flat 0% across roughly twenty prior iterations.
+  **~30–40%** on near-standing starts, **~17–23%** on the full calm+harsh distribution, as of the
+  current run (`v21`) at ~55M steps — up from a flat 0% across roughly twenty prior iterations and
+  a first breakthrough of ~1%.
+- Training-log `fall_rate` staying stubbornly high (0.55–0.75) while the real gate keeps climbing
+  is read as a *healthy* sign here, not a contradiction: earlier iterations had low fall_rate with
+  zero real success (a safe, low-crouch local optimum); `v21` appears to be genuinely attempting
+  the harder, correct target (a tall, upright stand) and succeeding at it some of the time, rather
+  than settling for the easy wrong answer.
+- The curriculum is still holding at 100% calm (near-standing) starts — the performance gate to
+  start mixing in harsh/collapsed starts (`fall_rate ≤ 0.1` and max streak ≥ 10s, sustained over
+  200 episodes) hasn't been cleared yet.
 - Physical capability is confirmed sufficient; remaining work is about reward/curriculum shaping
   finding the easy, low-torque equilibrium reliably rather than settling for a low, stable crouch.
+- This track was split out of the original combat repo (`fightai`) into its own repo (`standai`)
+  once it was clear it needed independent iteration speed; `build_model.py`/`env.py` are copied
+  rather than shared, so a body change has to be applied in both places by hand.
 - Walking and the combat league are intentionally on hold until standing is solid — the project's
   own working hypothesis is that sequencing "stand" → "walk" → "fight" as separate, gated curriculum
   stages will go faster than tackling them together, for the same reason splitting "hold a stand"
