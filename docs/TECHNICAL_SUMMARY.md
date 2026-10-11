@@ -144,15 +144,13 @@ has a limit (somewhere under five sequential changes) rather than being wrong in
 
 ## 4. Where it stands now
 
-> **Update 2026-10-11** -- superseded in part; full write-up in
-> [`experiments_2026-10-11.md`](experiments_2026-10-11.md). Current run `v28` (~95M steps, body with
-> x1.5 limb torque): calm gate ~50%, full ~25%, harsh-only ~6% (unchanged). Findings since the
-> bullets below were written: the harsh score is "cannot get up from the ground", not a metric
-> artifact; the body *can* get up (closed-loop MPC oracle: 2/6 lying starts at the original gears,
-> 5/6 at x1.5) but with thin torque margin, so the limb torque spec was raised to x1.5; reward
-> shaping (36M steps) and failed-start replay (9M steps) did not help. "Physical capability is
-> confirmed sufficient" below applies to *holding* a stand, not to getting up from the ground.
-> Numbers in the bullets below are from the original-gear body and are not comparable.
+> **Update 2026-10-12** -- superseded in part; see §5 and the full write-up in
+> [`experiments_2026-10-11.md`](experiments_2026-10-11.md). The single stand policy (now `v37`,
+> ~102M steps, x1.5 limb-torque body) plateaued at calm ~50-57% / full ~23-30% / harsh ~5%, and no
+> checkpoint ever got up from a start below 0.6 m torso height (0/160). The task was therefore split
+> into a stand policy and a separate floor get-up policy (§5). "Physical capability is confirmed
+> sufficient" below applies to *holding* a stand, not to getting up. Numbers in the bullets below are
+> from the original-gear body and are not comparable.
 
 - Standing from an arbitrary posture, held for 3 full seconds, deterministic policy, fixed seeds:
   **~30–40%** on near-standing starts, **~17–23%** on the full calm+harsh distribution, as of the
@@ -175,3 +173,56 @@ has a limit (somewhere under five sequential changes) rather than being wrong in
   own working hypothesis is that sequencing "stand" → "walk" → "fight" as separate, gated curriculum
   stages will go faster than tackling them together, for the same reason splitting "hold a stand"
   from "get up from a collapse" did.
+
+## 5. Update 2026-10-12: a separate floor get-up policy
+
+**Why split.** Everything tried on the single policy left floor behaviour unchanged: reward
+shaping, failed-start replay, a 1.5x stronger body (helped calm only), correlated exploration
+noise, env-level "bursts" (random +-1 limb patterns executed by the environment, never stored in
+the PPO buffer) and a frontier-ladder reset archive (Go-Explore style). Policy-alone, head above
+0.5 m on only 4-8% of floor starts, versus 77% for policy-free random bang-bang patterns. The
+floor behaviour is a leg-swinging reflex learned during calm training, and a single state-independent
+action std cannot be wide on the floor and narrow while balancing.
+
+**Design.** `FloorEnv` (`scripts/floor_env.py`) starts every episode lying (torso < 0.5 m) and
+ends it on reaching the *hand-off pose*: torso >= 0.6 m, head >= 0.9 m, a foot on the floor,
+|pitch| < 60 deg. Reward is deliberately plain: a head-height record bonus (pays only for a new
+best height, with a foot down), small head/torso height terms, and a success bonus; no balance
+terms. A fresh network is trained with plain PPO (`train_floor.py`, 8 envs). The reached state is
+reported in `info["handoff_state"]` so the stand policy can later practise from exactly the states
+the floor policy hands over. Holding the pose afterwards is the stand policy's job.
+
+**Results** (deterministic policy alone, fixed seeds, not training-log numbers):
+
+| Run | Steps | Head > 0.5 m | Reaches hand-off |
+|---|---|---|---|
+| v1, with bursts | 1.3M | 20% | -- |
+| v2, no bursts, loose success | 0.6M | 72% | -- |
+| v4, reach success | 7.6M / 9.3M / 10.2M | 92% (9.3M) | 24% / 34% / 38% (100 seeds at 10.2M) |
+
+End to end (floor policy until hand-off, then the stand policy `v37` for 3 s, 100 seeds): reached
+38, still upright after 3 s **3** -> **3/100** from lying starts, where the single policy had 0/160.
+The stand policy has never trained on hand-off states; that is the next step. The floor policy
+reached the pose from 38/82 starts of one side and 0/18 of the other (split by the sign of the
+initial torso pitch; the face-up/face-down mapping is unverified).
+
+**Lessons recorded the hard way.**
+- Bursts help a pretrained policy's *training data* but hurt a fresh policy: during a burst the
+  stored action is uncorrelated with the outcome, so up to half of floor time carries no gradient,
+  and the training-log metrics are inflated (46% vs 6% policy alone at 0.2M steps).
+- A success defined as "head >= 0.9 m once" produced a pop-up (head up, torso back to 0.3-0.5 m
+  within 3 s). A first fix required holding the pose 20 steps, which made the floor policy also
+  responsible for balance and cut its measured success to 0% even though 18% of seeds reached the
+  pose; the final definition is reach-and-hand-off, with holding measured separately by
+  actually handing over to the stand policy.
+- The check that first exposed the pop-up continued the *floor* policy after the success, which
+  says nothing about hand-off quality. The hand-off has to be tested with the policy that takes over.
+- A large action std (0.6+ on every joint) is not by itself a sign of instability here: 65% of
+  deterministic floor actions are saturated at the +-1 limit, so the body needs near-maximum torque
+  to rise. The unstable part is the update size (`approx_kl` ~0.4, `clip_fraction` ~0.75), which is
+  still unresolved.
+
+**Open.** (1) Train the stand policy from the floor policy's hand-off states. (2) Build the switch
+and a learned hand-off boundary ("will the stand policy hold 3 s from this state?"). (3) The
+unreached start side. (4) Lower the learning rate for the floor policy. (5) Multi-seed
+repetition: all results above are single training runs.

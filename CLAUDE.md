@@ -9,7 +9,7 @@ the "how do I actually run/resume/check things" operational layer.
 
 Check before assuming anything is idle or stale:
 ```bash
-pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py"
+pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py|train_floor.py|floor_progress_notify.py|watch_floor.py"
 ```
 Current lineage: `ppo_stand_v37_ladder`, logging to `checkpoints/locomotion_train_stand_v37.log`.
 **Body spec changed (2026-10-11): limb actuator gears are x1.5 by default** (`BODY_GEAR_SCALE` in
@@ -112,6 +112,10 @@ Resume: `cd scripts; ../.venv/bin/python train_floor.py --n-envs 8 --timesteps 2
 --floor-burst-rate 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_floor_v4_*_steps.zip | head -1)" >> ../checkpoints/floor_train_v4.log 2>&1 &`.
 Watch: `DISPLAY=:1 ../.venv/bin/python watch_floor.py <ckpt> [--only-success]` (keeps running 3 s after a success).
 Watching shows supine starts try a bent-leg get-up and prone starts a push-up.
+**v4 @10.2M, policy alone (100 seeds): reaches the hand-off pose 38/100 (24% -> 34% -> 38% over 7.6M -> 10.2M); stand policy v37 then
+holds 3 s in 3/38 -> 3/100 end-to-end upright from lying starts (was 0/160).** Reach is 38/82 on one start side (sign of initial
+torso pitch) and 0/18 on the other (face-up/down mapping unverified). Next: train the stand policy from `info["handoff_state"]`
+states, build the switch, lower the floor learning rate (approx_kl ~0.45, clip_fraction ~0.78).
 
 Why this approach (findings, 2026-10-11):
 - Harsh-only is ~entirely "cannot get up from the ground": of harsh starts that begin below
