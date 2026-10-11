@@ -93,19 +93,25 @@ All of `--getup-reward` / `--ground-shaping` / `--replay-curriculum` / `--gear-c
 **Floor get-up is now a SEPARATE policy (2026-10-12)** -- `scripts/floor_env.py` (`FloorEnv`), `train_floor.py`,
 `floor_progress_notify.py`, `watch_floor.py`. Why: the single stand policy never got off the floor (0/160 genuine uprights
 below 0.6 m, calm-learned leg-swing reflex); a fresh network on floor-only episodes has no such habit. Every episode starts
-lying (torso < 0.5 m); reward is only head-record + small head/torso height terms + a success bonus; success = HOLD the
-hand-off pose (torso >= 0.6 m, head >= 0.9 m, foot down, |pitch| < 40 deg) for 20 steps (v1/v2 ended on the first instant
-head >= 0.9 m and every such "success" dropped back to torso 0.3-0.5 m within 3 s -- a pop-up, not a stand). Combine with the
-stand policy by a state switch (floor policy while torso < 0.5 m / until hand-off, stand policy after; hysteresis); the switch
+lying (torso < 0.5 m); reward is only head-record + small head/torso height terms + a success bonus. **Success = REACH the
+hand-off pose** (torso >= 0.6 m, head >= 0.9 m, foot down, |pitch| < 60 deg), episode ends there; holding it is the STAND
+policy's job. (v3 required holding 20 steps -- that made the floor policy do balance too and its success stayed 0 while 18%
+of seeds reached the pose; v4 went back to reach.) Hand-off states are reported in `info["handoff_state"]`.
+Combine with the stand policy by a state switch (floor policy until hand-off, stand policy after; hysteresis); the switch
 and the hand-off boundary are NOT built yet (idea: a small classifier "does the stand policy hold 3 s from this state").
 Findings: env-level bursts HURT a fresh floor policy (v1 w/ bursts: head>0.5 m 20% policy-alone at 1.3M vs v2 w/o bursts 72% at
-0.63M) -- use `--floor-burst-rate 0`. v2 (loose success, 3.35M) -> v3 (hold success, from v2 @3.35M, 8 envs):
-`ppo_floor_v3`, log `checkpoints/floor_train_v3.log`, notifier `floor_progress_notify.py` (policy-alone eval every 30 min).
-v3 @4.9M policy alone: success 0/50, torso peak >0.7 m in 12/50, longest hold 3 of 20 steps; approx_kl 0.3 / clip_fraction
-0.75 (too high -- next candidate: lower learning rate + std floor); watching it, supine starts try a bent-leg get-up and prone
-starts a push-up. Resume: `cd scripts; ../.venv/bin/python train_floor.py --n-envs 8 --timesteps 20000000 --out ppo_floor_v3
---floor-burst-rate 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_floor_v3_*_steps.zip | head -1)" >> ../checkpoints/floor_train_v3.log 2>&1 &`.
-Watch: `DISPLAY=:1 ../.venv/bin/python watch_floor.py <ckpt> [--only-success]` (keeps running 3 s after a success to show whether it holds).
+0.63M) -- use `--floor-burst-rate 0`. Measured catch rate: floor policy reaches hand-off in 5% (v2) / 18% (v3) of 100 seeds and
+the stand policy v37 then holds 3 s in only 1/5 / 2/18 of those -- the stand policy must be trained on hand-off states.
+Floor action std is ~0.64 on every joint (stand policy 0.47) and 65% of deterministic actions are saturated (|a| > 0.9): getting
+up on this body needs near-max torque and wide moves; std is a state-independent parameter so one policy cannot be wide on the
+floor and narrow when balancing (one more reason for the split). KL stays ~0.3-0.4 / clip_fraction ~0.75 (candidate fix if
+success stalls: lower learning rate, entropy bonus off; `train_floor.py` has no --learning-rate flag yet).
+Lineage: v1 (bursts) -> v2 (no bursts, loose success) -> v3 (hold success) -> v4 (reach success, from v3 @5.925M, 8 envs):
+`ppo_floor_v4`, log `checkpoints/floor_train_v4.log`, notifier `floor_progress_notify.py` (policy-alone eval every 30 min).
+Resume: `cd scripts; ../.venv/bin/python train_floor.py --n-envs 8 --timesteps 20000000 --out ppo_floor_v4
+--floor-burst-rate 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_floor_v4_*_steps.zip | head -1)" >> ../checkpoints/floor_train_v4.log 2>&1 &`.
+Watch: `DISPLAY=:1 ../.venv/bin/python watch_floor.py <ckpt> [--only-success]` (keeps running 3 s after a success).
+Watching shows supine starts try a bent-leg get-up and prone starts a push-up.
 
 Why this approach (findings, 2026-10-11):
 - Harsh-only is ~entirely "cannot get up from the ground": of harsh starts that begin below

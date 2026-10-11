@@ -7,7 +7,7 @@ from exactly the states this policy hands over. Reward is deliberately plain (no
 
     head_record  K * (new best normalised head height - previous best), foot on the floor only
     floor_dense  small per-step terms for head height / torso height with a foot down
-    success      one-off bonus once the hand-off pose has been HELD for HOLD_STEPS consecutive steps
+    success      one-off bonus once the hand-off pose has been held for HOLD_STEPS consecutive steps (v4+: 1 = reach)
 
 Hand-off pose = torso >= HOLD_TORSO_Z, head >= HANDOFF_HEAD_Z, a foot down, |pitch| < HANDOFF_MAX_PITCH_DEG.
 (v1/v2 ended the episode the first instant head >= 0.9 m with a foot down; watching successes showed every one
@@ -20,9 +20,9 @@ from locomotion_env import LocomotionEnv
 FLOOR_START_Z = 0.5            # resample the start until the torso is this low (lying / collapsed)
 FLOOR_MAX_STEPS = 250          # 5 s, same as the env's own DOWN_RECOVERY_STEPS
 HANDOFF_HEAD_Z = 0.9           # head height (m) at which the stand policy takes over
-HANDOFF_MAX_PITCH_DEG = 40.0
+HANDOFF_MAX_PITCH_DEG = 60.0
 HOLD_TORSO_Z = 0.6
-HOLD_STEPS = 20                # 0.4 s of continuously holding the hand-off pose
+HOLD_STEPS = 1                 # reach = success (v3 used 20 steps; holding the pose is the STAND policy's job)
 RECORD_K = 10.0
 DENSE_SCALE = 0.02
 TORSO_DENSE_SCALE = 0.03
