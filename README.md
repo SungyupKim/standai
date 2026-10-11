@@ -8,40 +8,38 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-## Current status (2026-10-10)
+## Current status (2026-10-11)
 
-Fixed-seed, deterministic 3-second-survival gate, measured fresh at 55.3M steps into the current
-run (`v21`, started from scratch two days ago):
+Fixed-seed, deterministic 3-second-survival gate (N=100 seeds; ±5 points of noise), current run
+`v28` at ~95M steps, **on the x1.5 limb-torque body** (see below):
 
-- **Calm starts** (near-standing posture, N=100, deterministic): **~30–40%** survive 3 full
-  seconds — noisy run to run, trending up.
-- **Full distribution** (calm + harsh/collapsed starts mixed, N=100): **~17–23%**.
-- Training-log `fall_rate` has dropped from ~1.0 to ~0.55–0.75 over the run; `max_stand_streak`
-  (longest continuous stand within an episode) is up to 300–480 steps (6–10s), from ~20 at the
-  start.
+- **Calm starts** (near-standing posture): **~50%** (best so far; was 30–40% for all earlier runs).
+  On 300 seeds: 152/300 vs 123/300 at the run's starting checkpoint on the same body.
+- **Full distribution** (calm + harsh/collapsed starts mixed): **~25%**.
+- **Harsh-only** (collapsed starts): **~6%**, unchanged. The policy essentially cannot get up from
+  the ground yet -- that is the open problem.
 
-For most of this track's history the real gate sat at a flat **0%** — training-log metrics kept
-looking better while the thing actually being measured (stand up from a fixed seed, hold it for
-3 seconds, deterministic policy) never budged. Two things changed that:
+What the investigation found (details, numbers and failures: [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md)):
 
-1. **Found two silent measurement bugs**: a stale module-level override that was quietly
-   overwriting a reward-scale tuning attempt, and a viewer script that had never actually been
-   passing `stand_only=True` — every manual "does this look right" check all night had secretly
-   been running with an assist force re-enabled that training doesn't get.
-2. **Abandoned a long chain of `--init-from` warm-started reward-constant changes and restarted
-   from scratch** with everything (body proportions, the full curriculum, current reward scales)
-   baked in from step 0. The suspicion was that five-plus sequential warm starts had destabilized
-   the value function. The scratch run (`v21`) hit its first non-zero real-gate result (5%) in
-   under 12M steps — the previous warm-started lineage took 33M+ steps to reach 1%. That result
-   held up as training continued, so the "too much accumulation" hypothesis looks correct, at
-   least in this instance.
+1. **The low harsh score is "cannot get up", not a measurement artifact.** Of collapsed starts that
+   begin below the fall height, ~0-3% end up standing within the environment's 5 s window.
+2. **The body can get up, but with little torque margin.** A closed-loop MPC oracle (exact simulator,
+   diagnostic only) stands from 2/6 lying starts at the original actuator gears, and 5/6 at x1.5.
+   An open-loop CEM search never did (it finds headstands and mid-air leaps). Hence the body spec
+   changed to **x1.5 maximum limb torque** (`BODY_GEAR_SCALE` in `locomotion_env.py`; set
+   `STANDAI_BODY_GEAR=1` to reproduce older numbers). Link masses were not scaled, so this is
+   slightly optimistic for real hardware.
+3. **Reward shaping and failed-start replay did not move harsh** (36M and 9M steps respectively); the
+   body change moved calm.
+4. Measurement lessons: training-log metrics disagree with the deterministic gate; torso-height-only
+   objectives get exploited (inverted/airborne poses); 100-seed gates are too noisy for single
+   comparisons.
 
-Curriculum is still holding at `calm_frac=1.0` (100% near-standing starts) — the performance gate
-to start mixing in harsh/collapsed starts (`fall_rate ≤ 0.1` and `max_stand_streak ≥ 500` steps,
-sustained over 200 episodes) hasn't been cleared yet. The physical capability was never in
-question: a direct `qfrc_bias` torque measurement at a hand-set standing pose shows it costs only
-1–5% of each joint's maximum output to hold a full standing posture. What's missing is still
-reward/curriculum design, not body capability.
+Earlier history: for most of this track the real gate sat at a flat **0%** while training-log metrics
+kept looking better; two silent measurement bugs (a stale module-level override, and a viewer that
+never passed `stand_only=True`) and a restart from scratch (`v21`) ended that. The physical capability
+of *holding* a stand was never in question (a `qfrc_bias` measurement shows it costs 1-5% of each
+joint's maximum output).
 
 ## Setup
 
@@ -65,6 +63,8 @@ scripts/stand_progress_notify.py  Periodic KakaoTalk progress pings with a real 
 scripts/kakao_notify.py       Shared KakaoTalk notify helper (copied from fightai)
 checkpoints/                  Trained models, autosaves, logs (gitignored)
 docs/                         Technical documentation (Korean full history + English summary)
+docs/experiments_2026-10-11.md  Why harsh won't learn: measurements, negative results, MPC oracle, gear findings
+scripts/analysis/             Diagnostics behind that doc (gates, MPC oracle, reward-by-height, gear sweep)
 ```
 
 `build_model.py`/`env.py` are copies of fightai's versions, not a shared dependency — if the body

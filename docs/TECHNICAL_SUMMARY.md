@@ -144,6 +144,16 @@ has a limit (somewhere under five sequential changes) rather than being wrong in
 
 ## 4. Where it stands now
 
+> **Update 2026-10-11** -- superseded in part; full write-up in
+> [`experiments_2026-10-11.md`](experiments_2026-10-11.md). Current run `v28` (~95M steps, body with
+> x1.5 limb torque): calm gate ~50%, full ~25%, harsh-only ~6% (unchanged). Findings since the
+> bullets below were written: the harsh score is "cannot get up from the ground", not a metric
+> artifact; the body *can* get up (closed-loop MPC oracle: 2/6 lying starts at the original gears,
+> 5/6 at x1.5) but with thin torque margin, so the limb torque spec was raised to x1.5; reward
+> shaping (36M steps) and failed-start replay (9M steps) did not help. "Physical capability is
+> confirmed sufficient" below applies to *holding* a stand, not to getting up from the ground.
+> Numbers in the bullets below are from the original-gear body and are not comparable.
+
 - Standing from an arbitrary posture, held for 3 full seconds, deterministic policy, fixed seeds:
   **~30–40%** on near-standing starts, **~17–23%** on the full calm+harsh distribution, as of the
   current run (`v21`) at ~55M steps — up from a flat 0% across roughly twenty prior iterations and
