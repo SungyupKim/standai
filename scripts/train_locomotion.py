@@ -577,6 +577,27 @@ class BurstArchiveCallback(BaseCallback):
         self._last_sync = self.num_timesteps
 
 
+class HandoffPoolCallback(BaseCallback):
+    """Starts a fraction of episodes from states the FLOOR get-up policy hands over (make_handoff_pool.py).
+
+    The stand policy never practised those states (it caught ~10% of them), so they are handed to the envs once as the
+    replay pool (set_replay_pool, same mechanism as the failed-start replay); the rest of the resets keep the normal
+    calm / harsh distribution. The pool is fixed (not refreshed from the policy being trained)."""
+
+    def __init__(self, path, frac=0.4):
+        super().__init__()
+        self.path, self.frac = path, frac
+
+    def _on_training_start(self):
+        d = np.load(self.path, allow_pickle=True)
+        pool = [(q, v, False) for q, v in zip(d["qpos"], d["qvel"])]
+        self.training_env.env_method("set_replay_pool", pool, self.frac)
+        print(f"[locomotion] hand-off pool: {len(pool)} states from {self.path} ({d['floor_ckpt']}), frac {self.frac}", flush=True)
+
+    def _on_step(self):
+        return True
+
+
 class FallRateCallback(BaseCallback):
     """Fraction of completed episodes that ended via a_out (failed to recover within
     DOWN_RECOVERY_STEPS) rather than truncation at MAX_STEPS -- the direct metric this
@@ -646,6 +667,10 @@ def main():
     parser.add_argument("--burst-archive-frac", type=float, default=0.0,
                          help="BurstArchiveCallback: fraction of resets that start from archived high-head "
                               "states reached from the floor (0 = off; stand-only)")
+    parser.add_argument("--handoff-pool", type=str, default=None,
+                         help="npz from make_handoff_pool.py: start --handoff-frac of the episodes from the states the "
+                              "floor get-up policy hands over (stand-only)")
+    parser.add_argument("--handoff-frac", type=float, default=0.4)
     parser.add_argument("--std-min", type=float, default=None,
                          help="raise the lower bound of the policy action std (default keeps 0.05); also applied "
                               "once at load so a shrunken std is lifted immediately")
@@ -740,6 +765,8 @@ def main():
                                           already_relaxed=args.height_already_relaxed))
     if args.stand_only and args.replay_curriculum:
         callback_list.append(ReplayCurriculumCallback(frac=args.replay_frac))
+    if args.stand_only and args.handoff_pool:
+        callback_list.append(HandoffPoolCallback(args.handoff_pool, frac=args.handoff_frac))
     if args.stand_only and args.burst_archive_frac > 0.0:
         callback_list.append(BurstArchiveCallback(frac=args.burst_archive_frac))
     if args.colored_noise_rho > 0.0:

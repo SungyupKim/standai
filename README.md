@@ -15,20 +15,24 @@ off the floor (0/160 genuine uprights from starts below 0.6 m torso height, for 
 
 | Policy | Job | State |
 |---|---|---|
-| **Stand policy** (`train_locomotion.py`, lineage `v21 -> v36 -> v37`) | balance / hold a stand, recover from partial falls | ~102M steps. Gate (N=100, deterministic, 3 s, x1.5 body): calm ~50-57%, full ~23-30%; control (`v21`@82M) is 43 / 24 / 5. Flat over the last ~10M steps. |
-| **Floor get-up policy** (`train_floor.py`, `FloorEnv`, fresh network, lineage `v1 -> v4`) | from a lying start, raise the body to a hand-off pose (torso >= 0.6 m, head >= 0.9 m, a foot down, pitch < 60 deg) | ~10M steps. Policy alone, deterministic, 100 fixed seeds: **reaches the hand-off pose in 38/100** (median 2.5 s); 50-seed track: 24% -> 34% over 7.6M -> 9.3M steps. |
+| **Stand policy** (`train_locomotion.py`, lineage `v21 -> v36 -> v37 -> v38`) | balance / hold a stand, recover from partial falls, **hold what the floor policy hands over** | `v37` regressed after ~100M steps (calm gate 51 -> 38-45 on 100 seeds at 102-112M), so it was stopped at 120M and `v38` restarted from `v37`@96M (calm 51) with 40% of episode starts drawn from 1,500 hand-off states. Running; first 2M steps: no change yet (hand-off 9/150 vs 11/150, calm 49 vs 51). |
+| **Floor get-up policy** (`train_floor.py`, `FloorEnv`, fresh network, lineage `v1 -> v4`) | from a lying start, raise the body to a hand-off pose (torso >= 0.6 m, head >= 0.9 m, a foot down, pitch < 60 deg) | `v4` finished its 20M-step budget (25.9M cumulative): **reaches the hand-off pose in 80/100 deterministic fixed-seed starts** (median 1.8 s); 24% at 7.6M, 38% at 10.2M, 72-76% from 19M on. |
 
-**Combined, end to end (lying start -> floor policy -> stand policy for 3 s, 100 seeds): 3/100 end
-genuinely upright** (torso >= 0.7 m, head >= 0.9 m, pitch < 40 deg held 20 steps). The stand policy
-holds only 3 of the 38 hand-offs: it has never practised those states. Before the split the same
-measurement was 0/160. The switch between the two policies and a learned hand-off boundary are **not
-built yet**; the numbers above come from a hard-coded hand-off in a test script.
+**Combined, end to end** (lying start -> floor policy -> stand policy for 3 s, 158 hand-off states from
+200 starts): **8/100 starts end genuinely upright** with `v37`@99M (torso >= 0.7 m, head >= 0.9 m,
+pitch < 40 deg held 20 steps), 3/100 with `v37`@120M. Before the split the same measurement was
+0/160. The floor policy is no longer the bottleneck: the stand policy catches only ~7% of the
+states handed over, because it never practised them -- which is what `v38` trains on. The switch
+between the two policies and a learned hand-off boundary are **not built yet**; the numbers above come
+from a hard-coded hand-off in test scripts (`scripts/make_handoff_pool.py`, `stand_progress_notify.py`).
 
-Open problems, in order of importance: (1) the stand policy must be trained from the floor policy's
-hand-off states (the env already reports them in `info["handoff_state"]`); (2) the floor policy
-reaches the pose only from one of the two start sides (38/82 vs 0/18 split by the sign of the initial
-torso pitch -- which sign is face-up has not been verified); (3) PPO is unstable on the floor policy
-(`approx_kl` ~0.4, `clip_fraction` ~0.75) -- a lower learning rate is the next candidate.
+Open problems, in order of importance: (1) does `v38` raise the hand-off catch rate (7% now; the
+evaluation set of 150 hand-off states is disjoint from the 1,500 training states, so memorising shows
+up as a train/eval gap) -- the pool is fixed, a refreshed or failure-weighted pool is the next step;
+(2) the switch and hand-off boundary; (3) the floor policy reached the pose only from one of the two
+start sides at 10M steps (38/82 vs 0/18, split by the sign of the initial torso pitch; which sign is
+face-up is unverified) -- not re-checked at 25.9M; (4) PPO on the floor policy ran with `approx_kl` ~0.4-0.56
+and `clip_fraction` ~0.78 the whole time, yet kept improving.
 
 What the investigation found (details, numbers and failures: [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md)):
 

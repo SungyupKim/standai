@@ -126,6 +126,42 @@ def gate_survival_rate_calm_only(ckpt_path):
     return _run_gate(env, model)
 
 
+HANDOFF_EVAL = None   # npz from make_handoff_pool.py --deterministic (set by --handoff-eval)
+
+
+def handoff_catch(ckpt_path, npz_path):
+    """The stand policy starts from states the floor policy handed over and has 3 s: how many end genuinely upright
+    (torso >= 0.7 m, head >= 0.9 m, pitch < 40 deg held 20 steps). Returns (upright, torso>=0.7 at end, n)."""
+    import mujoco
+    import numpy as np
+    from stable_baselines3 import PPO
+
+    from locomotion_env import LocomotionEnv
+
+    model = PPO.load(ckpt_path, device="cpu")
+    d = np.load(npz_path, allow_pickle=True)
+    env = LocomotionEnv(stand_only=True)
+    up = caught = 0
+    n = len(d["qpos"])
+    for i in range(n):
+        env.reset(seed=i)
+        env.data.qpos[:], env.data.qvel[:] = d["qpos"][i], d["qvel"][i]
+        mujoco.mj_forward(env.model, env.data)
+        env._prev_com_x = None                        # first observation convention (same as reset / replay starts)
+        obs = env._obs()
+        ok = 0
+        for _ in range(GATE_WIN):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _r, _t, _u, _info = env.step(action)
+            tz = float(env.data.xpos[env.a_torso_id][2])
+            hd = float(env.data.xpos[env.a_head_id][2])
+            pt = (env.data.qpos[env.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi
+            ok = ok + 1 if (tz >= 0.7 and hd >= 0.9 and abs(pt) < np.deg2rad(40.0)) else 0
+        up += ok >= 20
+        caught += tz >= 0.7
+    return up, caught, n
+
+
 def format_message(v, total, gate_rate, gate_ckpt, calm_gate_rate, baseline_steps=0):
     steps = v.get("total_timesteps", 0)
     # `total` (--total-timesteps) is train_locomotion.py's per-launch budget, i.e. "how many
@@ -165,6 +201,9 @@ def format_message(v, total, gate_rate, gate_ckpt, calm_gate_rate, baseline_step
     else:
         lines.append(f"실제 3초 생존율 (전체 분포, 고정 시드 {GATE_N}개): {gate_rate:.0%}")
         lines.append(f"실제 3초 생존율 (calm만, 1단계 기준): {calm_gate_rate:.0%}")
+        if HANDOFF_EVAL and gate_ckpt:
+            up, caught, n = handoff_catch(gate_ckpt, HANDOFF_EVAL)
+            lines.append(f"바닥 정책 인계 상태 받아내기 ({n}개 -> 3초 뒤 직립 유지): {up}/{n} ({up / n:.0%}), 몸통>=0.7m {caught}/{n}")
         lines.append(f"  기준 체크포인트: {os.path.basename(gate_ckpt)}")
     lines.append("")
     lines.append("-- 아래는 학습 로그 수치, 왜곡될 수 있어 참고만 --")
@@ -193,7 +232,12 @@ def main():
                               "relative to (matches train_locomotion.py's --init-from "
                               "reset_num_timesteps=False behavior) -- default: auto-detect from "
                               "the log's current value when this script starts")
+    parser.add_argument("--handoff-eval", default=None,
+                         help="npz of floor-policy hand-off states (make_handoff_pool.py --deterministic): adds the "
+                              "'does the stand policy hold what the floor policy hands over' line")
     args = parser.parse_args()
+    global HANDOFF_EVAL
+    HANDOFF_EVAL = args.handoff_eval
     log_path = pathlib.Path(args.log)
 
     baseline_steps = args.baseline_steps

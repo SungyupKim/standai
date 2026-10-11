@@ -226,3 +226,23 @@ initial torso pitch; the face-up/face-down mapping is unverified).
 and a learned hand-off boundary ("will the stand policy hold 3 s from this state?"). (3) The
 unreached start side. (4) Lower the learning rate for the floor policy. (5) Multi-seed
 repetition: all results above are single training runs.
+
+**Later the same day (2026-10-12).** The floor policy `v4` finished its budget at 25.9M cumulative steps and
+reaches the hand-off pose in **80/100** fixed-seed starts (deterministic, median 1.8 s); the 7.6M / 10.2M /
+19M+ points were 24% / 38% / 72-76%. Handing 158 of its hand-off states to the stand policy for 3 s:
+`v37`@99M holds 12 of 158 (7.6%) -> 8/100 end to end; `v37`@120M holds 5 -> 3/100. So the floor policy is no
+longer the bottleneck.
+
+The stand policy had meanwhile **regressed**: its 100-seed calm gate went 49-51 (90-99M) -> 45 / 41 / 47 / 38
+(102 / 105 / 108 / 112M), while its training-log metrics (std 0.47, `r_head_record`, no NaN) looked healthy and
+the hand-off catch rate stayed flat (5-9%) across all checkpoints. It was stopped at 120M. Checkpoint choice for
+the restart was made by measurement: `v37`@96M (calm 51, hand-off 12/158), the last point before the decline.
+
+`v38` restarts the stand policy from `v37`@96M with 40% of episode starts drawn from a fixed pool of 1,500
+hand-off states (`make_handoff_pool.py`, seeds disjoint from the 150-state evaluation set, half sampled
+stochastically), 80% calm among the remaining starts, and all floor-exploration devices (bursts, reset
+archive, head-record bonus, correlated noise, entropy bonus) switched off. First 2M steps: `approx_kl` settled
+from 0.2-0.4 to 0.03; hand-off catch 9/150 vs 11/150 at the start, calm gate 49 vs 51 -- no effect yet, and
+calm is not being lost. The pool is static; a failure-weighted refresh is the planned next step if the
+train/eval gap opens.
+

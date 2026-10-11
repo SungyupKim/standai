@@ -11,7 +11,7 @@ Check before assuming anything is idle or stale:
 ```bash
 pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py|train_floor.py|floor_progress_notify.py|watch_floor.py"
 ```
-Current lineage: `ppo_stand_v37_ladder`, logging to `checkpoints/locomotion_train_stand_v37.log`.
+Current stand lineage: `ppo_stand_v38_handoff` (log `checkpoints/locomotion_train_stand_v38.log`, notifier `stand_progress_notify.py --handoff-eval`); `v37` was stopped at 120M after it regressed (see v38 below). Floor policy `ppo_floor_v4` finished.
 **Body spec changed (2026-10-11): limb actuator gears are x1.5 by default** (`BODY_GEAR_SCALE` in
 `locomotion_env.py`, hip 270 / knee 90 / ankle 60; root_x/root_ry untouched). Reason: a closed-loop MPC
 oracle stands from only 2/6 lying starts at x1 but 5/6 at x1.5 (same as x2), and an unchanged policy
@@ -90,6 +90,21 @@ Abandoned: v22/v23 (plateau at x1), v25 (`--getup-reward`, 36M steps), v26 (`--r
 All of `--getup-reward` / `--ground-shaping` / `--replay-curriculum` / `--gear-curriculum` / `--knee-gate` /
 `--head-progress` / `--head-record` / `--colored-noise-rho` / `--floor-burst-rate` / `--burst-archive-frac` / `--std-min` are opt-in. Full write-up: `docs/experiments_2026-10-11.md`.
 
+**v38 = v37 @96M restarted with hand-off starts (2026-10-12).** Why: v37's calm gate (100 seeds) fell 49-51 (90-99M) -> 45/41/47/38 (102-112M) while
+the training log looked fine, and the stand policy catches only ~7% of the states the floor policy hands over (5-9% for every checkpoint, so the
+restart point was chosen by calm gate: the last point before the decline, 96M). New flags: `--handoff-pool ../checkpoints/handoff_pool_v4.npz
+--handoff-frac 0.4` (`HandoffPoolCallback`; pool = 1500 states from `scripts/make_handoff_pool.py`, seeds 1000+, disjoint from the 150-state eval set
+`handoff_eval_v4.npz` = seeds 0.., deterministic floor policy). Bursts / archive / head-record / colored noise / entropy bonus are OFF (floor tooling).
+The pool is FIXED (not refreshed) -- if hand-off catch rises on the pool's states but not on the eval set, it is memorising; next step then is a
+failure-weighted refresh. Baseline at launch: hand-off upright 11/150, calm gate 51/100. Judge v38 by the notifier's "hand-off catch" line and the
+calm gate, not the training log.
+Resume v38: `cd scripts; ../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 40000000 --stand-only --out ppo_stand_v38_handoff
+--height-start-scale 6.0 --height-end-scale 15.0 --height-relax-frac 0.3 --height-already-relaxed --curriculum-fall-gate 0.65
+--curriculum-streak-gate 350 --calm-already-relaxed --calm-end-frac 0.8 --handoff-pool ../checkpoints/handoff_pool_v4.npz --handoff-frac 0.4
+--ent-coef 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_stand_v38_handoff_*_steps.zip | head -1)" >> ../checkpoints/locomotion_train_stand_v38.log 2>&1 &`
+(notifier: `stand_progress_notify.py --log ..._v38.log --ckpt-glob '../checkpoints/autosave/ppo_stand_v38_handoff_*_steps.zip' --total-timesteps 40000000
+--baseline-steps 96000000 --handoff-eval ../checkpoints/handoff_eval_v4.npz`). Chain is now v21 -> v36 -> v37 -> v38 (4 warm starts; CLAUDE.md warns at 5+).
+
 **Floor get-up is now a SEPARATE policy (2026-10-12)** -- `scripts/floor_env.py` (`FloorEnv`), `train_floor.py`,
 `floor_progress_notify.py`, `watch_floor.py`. Why: the single stand policy never got off the floor (0/160 genuine uprights
 below 0.6 m, calm-learned leg-swing reflex); a fresh network on floor-only episodes has no such habit. Every episode starts
@@ -112,7 +127,8 @@ Resume: `cd scripts; ../.venv/bin/python train_floor.py --n-envs 8 --timesteps 2
 --floor-burst-rate 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_floor_v4_*_steps.zip | head -1)" >> ../checkpoints/floor_train_v4.log 2>&1 &`.
 Watch: `DISPLAY=:1 ../.venv/bin/python watch_floor.py <ckpt> [--only-success]` (keeps running 3 s after a success).
 Watching shows supine starts try a bent-leg get-up and prone starts a push-up.
-**v4 @10.2M, policy alone (100 seeds): reaches the hand-off pose 38/100 (24% -> 34% -> 38% over 7.6M -> 10.2M); stand policy v37 then
+**FINAL: v4 finished at 25.9M steps: reaches the hand-off pose in 80/100 deterministic starts (median 1.8 s); with v37@99M catching it, 8/100 end-to-end upright (3/100 with v37@120M).**
+**Earlier, v4 @10.2M, policy alone (100 seeds): reaches the hand-off pose 38/100 (24% -> 34% -> 38% over 7.6M -> 10.2M); stand policy v37 then
 holds 3 s in 3/38 -> 3/100 end-to-end upright from lying starts (was 0/160).** Reach is 38/82 on one start side (sign of initial
 torso pitch) and 0/18 on the other (face-up/down mapping unverified). Next: train the stand policy from `info["handoff_state"]`
 states, build the switch, lower the floor learning rate (approx_kl ~0.45, clip_fraction ~0.78).
