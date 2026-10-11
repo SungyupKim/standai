@@ -1,4 +1,4 @@
-"""Usage: python scripts/analysis/reward_by_height.py [ckpt.zip] [--ground-shaping | --getup]
+"""Usage: python scripts/analysis/reward_by_height.py [ckpt.zip] [--ground-shaping | --getup | --knee-gate]
 Mean per-step reward and each term, binned by torso height, on harsh starts. Exposed the
 "lying flat pays more than a partial rise" valley."""
 import sys; sys.path.insert(0, 'scripts')
@@ -10,7 +10,7 @@ from env import FALL_HEIGHT
 ckpt = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1].endswith('.zip') else max(glob.glob('checkpoints/autosave/ppo_stand_v*_*_steps.zip'), key=os.path.getmtime)
 print('ckpt:', ckpt)
 model = PPO.load(ckpt, device='cpu')
-env = LocomotionEnv(stand_only=True, ground_shaping='--ground-shaping' in sys.argv, getup_reward='--getup' in sys.argv); env.set_calm_frac(0.0)
+env = LocomotionEnv(stand_only=True, ground_shaping='--ground-shaping' in sys.argv, getup_reward='--getup' in sys.argv, knee_gate='--knee-gate' in sys.argv); env.set_calm_frac(0.0)
 KEYS = ["height","stability","stance","knee_avoid","recovery","jerk","velocity","gait","brace","com","stand_streak","knee_straight","torso_upright","ground_height","getup_shift","getup_pen"]
 edges = [0,0.2,0.35,0.5,0.7,0.9,2.0]
 acc = defaultdict(lambda: defaultdict(float)); cnt = defaultdict(int); tot = defaultdict(float)

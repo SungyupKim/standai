@@ -237,6 +237,43 @@ GROUND_HEIGHT_REF = 0.8        # head z (m) at which the linear term saturates
 import os as _os
 BODY_GEAR_SCALE = float(_os.environ.get("STANDAI_BODY_GEAR", "1.5"))
 
+# ---- knee gate (stand-only, opt-in via knee_gate=True, 2026-10-11) ----
+# Observed on v28: while lying (torso z<0.5) the policy raises its legs high (lowest-knee height peaks
+# at 0.58 m, hip swing 2.7 rad/s) and tumbles ~1.4 turns per episode instead of getting up, and
+# knee_avoid (reward for knee height) pays ~0.5/step for it. So knee_avoid is faded out by HEAD height:
+# 0 at/below KNEE_GATE_HEAD_LO (about a seated head), full at/above KNEE_GATE_HEAD_HI (the head height
+# the upright-stand criterion uses). Calm starts keep the head above HI, so they are unaffected.
+KNEE_GATE_HEAD_LO = 0.5
+KNEE_GATE_HEAD_HI = 0.9
+
+# ---- head-height progress (stand-only, opt-in via head_progress=K, 2026-10-11) ----
+# Reward for RISING, not for being high: bonus = K * (gamma * phi(head') - phi(head)) with phi the head
+# height capped at HEAD_PROGRESS_CAP (so nothing is paid above it) and normalised to [0, 1]. This is
+# potential-based shaping: rising pays, falling costs the same, so rolling/oscillating up and down nets ~0
+# and sitting at any height earns nothing extra (the 'sit and farm' optimum a state-based height bonus
+# creates). Gives a steep gradient exactly where the per-step reward was flat near the floor.
+HEAD_PROGRESS_CAP = 0.9
+HEAD_PROGRESS_GAMMA = 0.99     # = PPO gamma; keeps the shaping potential-based
+
+# ---- head-height record bonus (stand-only, opt-in via head_record=K, 2026-10-11) ----
+# The potential-based head_progress term nets to zero over a rise-and-fall, so it barely incentivises the
+# floor attempts that rarely hold. This one is NOT cancelled: it pays K * (new best normalised head height -
+# previous best) only when the head exceeds its best height so far IN THIS EPISODE, and only while a foot is on
+# the floor (so leaping/leg-flinging doesn't count). Falling back costs nothing, but a height is paid once, so
+# the episode total is bounded by K * (1 - start height) and cannot be farmed by bobbing. Calm starts begin
+# with the head already at the cap, so they never pay.
+HEAD_RECORD_CAP = 0.9
+
+# ---- burst archive (stand-only, opt-in via set_archive_collect, 2026-10-11) ----
+# States reached from a floor start with the head in [LO, HI) m, a foot down and the torso not inverted are
+# reported in info["archive_state"] (qpos, qvel, head_z), at most once per ARCHIVE_COOLDOWN steps. The trainer
+# keeps them and later starts a share of episodes from them (set_replay_pool), so the policy practises the
+# part AFTER the rise from poses the body demonstrably reaches from the floor.
+ARCHIVE_HEAD_LO = 0.25        # lowest rung: lying with the head just off the floor
+ARCHIVE_HEAD_HI = 1.10        # top rung: 'just stood up' (head past 0.9 m) -- the link that breaks (16 of 19 fall back)
+ARCHIVE_GAIN = 0.08           # frontier rule: only states >= this much above where THIS episode started are stored
+ARCHIVE_COOLDOWN = 10
+
 REPLAY_JITTER_RAD = 0.03       # joint jitter applied to replayed start states (failed-start replay)
 
 GETUP_SHIFT_SCALE = 1.0
@@ -254,8 +291,17 @@ STAND_STREAK_REF = 150         # steps (3s) -- same window the eval gate uses
 
 
 class LocomotionEnv(Fighter2DEnv):
-    def __init__(self, render_mode=None, stand_only=False, ground_shaping=False, getup_reward=False):
+    def __init__(self, render_mode=None, stand_only=False, ground_shaping=False, getup_reward=False,
+                 knee_gate=False, head_progress=0.0, head_record=0.0):
         self._stand_only = stand_only
+        self._knee_gate = knee_gate and stand_only
+        self._head_progress = float(head_progress) if stand_only else 0.0
+        self._prev_phi = 0.0
+        self._head_record = float(head_record) if stand_only else 0.0
+        self._head_best = 0.0
+        self._start_head = 0.0
+        self._collect_archive = False
+        self._archive_cool = 0
         # getup_reward implies ground_shaping and adds the foot-contact / weight-shift / exploit
         # terms below
         self._getup = getup_reward and stand_only
@@ -516,6 +562,10 @@ class LocomotionEnv(Fighter2DEnv):
         if self._replay_pool and self.np_random.random() < self._replay_frac:
             self._load_replay_state(self._replay_pool[int(self.np_random.integers(len(self._replay_pool)))])
         self._record_start_state()
+        self._prev_phi = min(self.data.xpos[self.a_head_id][2], HEAD_PROGRESS_CAP) / HEAD_PROGRESS_CAP
+        self._archive_cool = 0
+        self._head_best = min(self.data.xpos[self.a_head_id][2], HEAD_RECORD_CAP) / HEAD_RECORD_CAP
+        self._start_head = float(self.data.xpos[self.a_head_id][2])
 
         self._resample_target_vx()
         mujoco.mj_forward(self.model, self.data)
@@ -527,6 +577,10 @@ class LocomotionEnv(Fighter2DEnv):
         loads one of them with probability `frac`. Same env_method broadcast as set_calm_frac."""
         self._replay_pool = list(pool)
         self._replay_frac = float(frac)
+
+    def set_archive_collect(self, flag):
+        """Report high-head states reached from floor starts in info['archive_state'] (see ARCHIVE_*)."""
+        self._collect_archive = bool(flag)
 
     def set_gear_scale_max(self, scale_max):
         """Upper end of the per-episode gear multiplier range (1.0 = nominal body only)."""
@@ -564,6 +618,39 @@ class LocomotionEnv(Fighter2DEnv):
             self.data.qfrc_applied[self._a_root_x_dof] = 0.0
 
         obs, reward, terminated, truncated, info = super().step(action, b_full_action=self._zero_action)
+        if self._knee_gate:
+            head_z = self.data.xpos[self.a_head_id][2]
+            kg = min(1.0, max(0.0, (head_z - KNEE_GATE_HEAD_LO) / (KNEE_GATE_HEAD_HI - KNEE_GATE_HEAD_LO)))
+            bd = info["reward_breakdown"]
+            reward -= bd["knee_avoid"] * (1.0 - kg)   # reward is the plain sum of these terms (env.py)
+            bd["knee_avoid"] *= kg
+        if self._head_progress > 0.0:
+            phi = min(self.data.xpos[self.a_head_id][2], HEAD_PROGRESS_CAP) / HEAD_PROGRESS_CAP
+            bonus = self._head_progress * (HEAD_PROGRESS_GAMMA * phi - self._prev_phi)
+            self._prev_phi = phi
+            reward += bonus
+            info["reward_breakdown"]["head_progress"] = bonus
+        if self._head_record > 0.0:
+            phi_r = min(self.data.xpos[self.a_head_id][2], HEAD_RECORD_CAP) / HEAD_RECORD_CAP
+            if phi_r > self._head_best:
+                foot_down, _ = self._getup_contacts()
+                if foot_down:
+                    bonus_r = self._head_record * (phi_r - self._head_best)
+                    self._head_best = phi_r
+                    reward += bonus_r
+                    info["reward_breakdown"]["head_record"] = bonus_r
+        if self._collect_archive:
+            self._archive_cool -= 1
+            hz_a = self.data.xpos[self.a_head_id][2]
+            if (self._archive_cool <= 0 and self._start_info is not None
+                    and (self._start_info["z"] < 0.45 or self._replayed)
+                    and ARCHIVE_HEAD_LO <= hz_a < ARCHIVE_HEAD_HI
+                    and hz_a >= self._start_head + ARCHIVE_GAIN):
+                foot_a, _ = self._getup_contacts()
+                pitch_a = (self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi
+                if foot_a and abs(pitch_a) < np.deg2rad(70.0):
+                    info["archive_state"] = (self.data.qpos.copy(), self.data.qvel.copy(), float(hz_a))
+                    self._archive_cool = ARCHIVE_COOLDOWN
         # 'b' is scripted to be irrelevant, but down_steps['b'] can still creep up over time
         # (no actuation holding it up) and trip a_out's `a_out or b_out` termination even
         # though 'a' itself is fine -- only 'a' failing to recover should end an episode here.
@@ -719,6 +806,7 @@ class LocomotionEnv(Fighter2DEnv):
         info["reward_breakdown"]["torso_upright"] = torso_upright_reward
         info["reward_breakdown"]["ground_height"] = ground_height_reward
         info["target_vx"] = self._target_vx
+        info["torso_z"] = float(self.data.xpos[self.a_torso_id][2])
         if (terminated or truncated) and self._start_info is not None:
             info["episode_start"] = self._start_info
 

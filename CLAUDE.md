@@ -11,7 +11,7 @@ Check before assuming anything is idle or stale:
 ```bash
 pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py"
 ```
-Current lineage: `ppo_stand_v28_body15`, logging to `checkpoints/locomotion_train_stand_v28.log`.
+Current lineage: `ppo_stand_v37_ladder`, logging to `checkpoints/locomotion_train_stand_v37.log`.
 **Body spec changed (2026-10-11): limb actuator gears are x1.5 by default** (`BODY_GEAR_SCALE` in
 `locomotion_env.py`, hip 270 / knee 90 / ankle 60; root_x/root_ry untouched). Reason: a closed-loop MPC
 oracle stands from only 2/6 lying starts at x1 but 5/6 at x1.5 (same as x2), and an unchanged policy
@@ -19,12 +19,93 @@ gains on crouched calm starts at x1.5 without losing upright ones. **Every resul
 (including all "baselines" below: calm 28-40 / full 17-23 / harsh 5-7) is at x1.** To reproduce an old
 number run the script with `STANDAI_BODY_GEAR=1`. The training/gate/notifier/viewer all pick the body up
 from the env automatically; never compare gate numbers across body specs.
-v28 branched from the v26 step-91.45M checkpoint (calm 37/full 18/harsh 6 at x1; 41/22/5 at x1.5), pure PPO,
-fixed x1.5 body, calm_frac=0.6 (`--calm-end-frac 0.6`, no curriculum flags). It replaces v27 (gear
-curriculum [1,2]->1, stopped at 93.3M after ~1.8M steps: gear_max 2.0->1.95). Abandoned: v22/v23
-(plateau at x1), v25 (`--getup-reward`, 36M steps, no change), v26 (`--replay-curriculum`, 9M steps, no
-change). `--getup-reward` / `--ground-shaping` / `--replay-curriculum` / `--gear-curriculum` remain in the
-code (opt-in). Full write-up: `docs/experiments_2026-10-11.md`.
+v28 (pure PPO, fixed x1.5 body, calm_frac 0.6) went 41 -> ~50 calm in ~4M steps and then plateaued;
+no harsh start that begins below 0.6 m torso height has ever ended upright (the "harsh improvement" came
+from starts at 0.62-0.67 m). The policy tumbles on the ground and swings its legs; `knee_avoid` paid for
+raised knees. v29 (v28 @106.3M + `--knee-gate`: knee_avoid faded out by head height, 0 below 0.5 m / full
+above 0.9 m) ran only ~1M steps before being replaced -- no verdict on the gate alone.
+v30 was a calm-only restart (from v21 @82.425M, body x1.5, `--knee-gate --head-progress 300`, 7M steps, calm_frac
+1.0 -> 0.69): rolling dropped (1.4 -> 0.95 turns/episode) but calm slipped below the control (127/300 vs 136/300)
+and no harsh start below 0.6 m ended upright. `--head-progress` (potential-based) nets to zero over a rise-and-fall,
+so it gives almost no net incentive -- that was the mistake in calling it "drastic". Leg lifting while lying is NOT
+a harsh-learned habit: v21 @82.4M (never saw harsh) already swings its legs and rolls 1.5 turns on the floor
+(calm-learned reflex).
+**v31 = v30 @89.5M + `--head-record 400`** (replaces head-progress; ran only ~0.3M steps before v32): pays K * (new best normalised head height -
+previous best) once per height per episode, only with a foot on the floor; not cancelled by falling back, bounded by
+K*(1-start height) ~ 320, 0 on calm starts. `--knee-gate` kept; `--calm-already-relaxed --calm-end-frac 0.5` so more
+episodes are floor starts. Probe: random flailing already earns ~31/episode and v30 ~28 (84% of floor episodes pay),
+so the low end is easy to reach and what separates policies is how high the head gets.
+**v32 = v31 + correlated exploration noise** (`ColoredNoiseCallback`, ran ~0.8M steps): rollout actions use an AR(1)
+noise (rho 0.9, per-step marginal = the policy's own std) instead of SB3's independent per-step noise. Side effect to
+avoid: its `--floor-noise-scale 1.5` (noise 1.5x wider than the policy's on the floor) is an off-policy sample the policy
+learns to avoid, so its std shrank 0.50 -> 0.46 (and to 0.345 within minutes of v33). Keep that at 1.0.
+Key finding behind v33/v34 (`scripts/analysis/random_explore.py`): noise added AROUND the policy's mean stays anchored to
+what the policy does (leg lifting) -- the policy lifts the head above 0.5 m on 6% of floor starts, but policy-FREE random
++-1 limb patterns held 10 steps do it on 77% (0.9 m: 11%, one genuine upright of 126; hold 25: 52%/6%; hold 50: 29%/3%;
+smooth random AR(1) noise only 6-31%). The learned policy is WORSE than random bang-bang at raising the head.
+v33 (stored the +-1 burst as the policy's action) diverged immediately: approx_kl 2e6, clip_fraction 0.95, std collapse,
+then NaN -- a +-1 pattern is far in the tails of the policy's Gaussian, so PPO's importance ratios explode. Lesson: never
+store off-support actions in the PPO buffer.
+**v34 = v31 @89.85M + env-level floor bursts** (`--floor-burst-rate 0.1 --floor-burst-hold 10`): on envs with torso < 0.5 m,
+a random +-1 limb pattern held 10 steps is executed by the ENV (via a `step_async` override) while the buffer keeps the
+policy's own on-policy sample, i.e. the burst is an environment disturbance that puts the body in raised-head states the
+policy then continues from (during a burst its stored action is uncorrelated with the outcome: noise, zero mean gradient).
+~half of floor time is in bursts. Healthy at launch: approx_kl 0.04-0.05, std 0.51, `r_head_record` 7 -> 28-34/episode.
+Log keys: `noise/floor_env_frac`, `noise/burst_active_frac`, `r_head_record`.
+v34 result (6.7M steps, 90.0M -> 97.2M): calm held (gate 43-54, 300-seed 150/300), but the policy ALONE (no bursts) did not
+move on floor starts (head>0.5 m: 5% -> 7%, >0.9 m: 0%, upright 0/126), its action std kept shrinking (0.51 -> 0.32), rolling
+went UP (1.42 turns, 17% inverted) and value_loss doubled. Bursts raise the head during training (r_head_record 7 -> 25-34)
+but nothing transfers to the policy by itself: the burst's motion is not in the PPO buffer.
+**v35 = v34 @97.2M + `--burst-archive-frac 0.25 --std-min 0.45 --ent-coef 0.002`** (two ways to make it stick):
+(1) `BurstArchiveCallback`: the env reports states reached from a floor start with head 0.45-0.9 m, a foot down and the
+torso not inverted (`info["archive_state"]`, at most one per 10 steps); they are kept in 4 head-height bins and 25% of ALL
+resets start from them (balanced across bins, via set_replay_pool) -- pure RL, the policy practises "continue from a
+raised pose". (2) std floor 0.45 (lifted at load: 0.315 -> 0.450) + a small entropy bonus to stop the std shrinking.
+Not done (user's call): self-imitation of successful bursts (averaging random patterns may give ~0 mean action).
+Log keys: `archive/size`, `archive/bin*`, `archive/success_replayed`, `noise/burst_active_frac`, `r_head_record`.
+v35 ran only ~0.7M steps (policy alone: head>0.5 m 8%, >0.9 m 0%, upright 0/126, std held at 0.45) before being replaced.
+**v36 = the same flag set restarted from the calm-only v21 @82.425M** (warm-start chain reset to 1: v21 -> v36) with
+`--calm-already-relaxed --calm-end-frac 0.5` from step 0. Why no calm-only warm-up phase: bursts, the head-record bonus and
+the archive all need FLOOR episodes, so a calm_frac that starts at 1.0 produces none of them at first; with 0.5 from the start
+r_head_record is 29-33/episode within minutes. v21 already has the calm skill (43 gate on the x1.5 body) and the leg-swing
+reflex too (so the restart does not remove that habit; it removes the std drift / extra rolling accumulated in v32-v35).
+v36 ran ~4M steps (policy alone: head>0.5 m 4%, >0.9 m 0%, upright 0/126, same as its v21 start; archive-started episodes held a
+3 s stand 1.3% of the time). Chain probe (`scripts/analysis/chain_probe.py`, 123 mid-height states, 5 s): from head 0.6-0.9 m the
+policy gets the head past 0.9 m 30% of the time, but 16 of the 19 episodes that did fall back (median 0.56 s above 0.7 m torso
+height; the gate needs 3 s) -> the weakest link is balance right after standing up, not the rise itself; from head 0.45-0.6 m the
+policy (6%) is WORSE than random bursts (15%).
+**v37 = v36 @86.45M with a FRONTIER ladder archive** (same flags; the change is in the env/callback): (1) rungs now span
+head 0.25 -> 1.10 m in 7 bins (0.25/0.35/0.45/0.55/0.65/0.75/0.90/1.10): the lowest rung is lying with the head just off the floor
+(before, nothing below 0.45 m was stored, so the lying->0.45 step had no rung) and the top rung is "just stood up, still moving".
+(2) Frontier rule (Go-Explore style): a state is stored only if the head is >= 0.08 m above where THAT episode started, and archive-
+started episodes contribute too, so each rung seeds the next. Verified: round 2 (started from round-1 states) produced states +0.18 m
+above their own starts on average, max head 0.95 m; calm starts contribute nothing. Bursts still apply only while torso < 0.5 m,
+so the upper rungs are practised by the policy alone.
+Judge v37 by (all measured on the policy ALONE): harsh starts below 0.6 m ending upright (docs 3.8; 0/160 for every checkpoint so
+far), `random_explore.py <ckpt>` policy row (head>0.5 / >0.9 m on floor starts), `chain_probe.py <ckpt>` (does the rise continue from
+mid-height states and, above all, does it END upright: 3/123 now), `archive/success_replayed` and the `archive/bin*` sizes (the top
+rungs filling is the sign the ladder is working), tumble count, std staying ~0.45, calm / upright-start (~77-85%) holding.
+Abandoned: v22/v23 (plateau at x1), v25 (`--getup-reward`, 36M steps), v26 (`--replay-curriculum`, 9M steps), v27
+(`--gear-curriculum`, 1.8M steps), v28 (plateau ~50 calm, 0 floor get-ups), v29 (~1M steps), v30 (7M steps).
+All of `--getup-reward` / `--ground-shaping` / `--replay-curriculum` / `--gear-curriculum` / `--knee-gate` /
+`--head-progress` / `--head-record` / `--colored-noise-rho` / `--floor-burst-rate` / `--burst-archive-frac` / `--std-min` are opt-in. Full write-up: `docs/experiments_2026-10-11.md`.
+
+**Floor get-up is now a SEPARATE policy (2026-10-12)** -- `scripts/floor_env.py` (`FloorEnv`), `train_floor.py`,
+`floor_progress_notify.py`, `watch_floor.py`. Why: the single stand policy never got off the floor (0/160 genuine uprights
+below 0.6 m, calm-learned leg-swing reflex); a fresh network on floor-only episodes has no such habit. Every episode starts
+lying (torso < 0.5 m); reward is only head-record + small head/torso height terms + a success bonus; success = HOLD the
+hand-off pose (torso >= 0.6 m, head >= 0.9 m, foot down, |pitch| < 40 deg) for 20 steps (v1/v2 ended on the first instant
+head >= 0.9 m and every such "success" dropped back to torso 0.3-0.5 m within 3 s -- a pop-up, not a stand). Combine with the
+stand policy by a state switch (floor policy while torso < 0.5 m / until hand-off, stand policy after; hysteresis); the switch
+and the hand-off boundary are NOT built yet (idea: a small classifier "does the stand policy hold 3 s from this state").
+Findings: env-level bursts HURT a fresh floor policy (v1 w/ bursts: head>0.5 m 20% policy-alone at 1.3M vs v2 w/o bursts 72% at
+0.63M) -- use `--floor-burst-rate 0`. v2 (loose success, 3.35M) -> v3 (hold success, from v2 @3.35M, 8 envs):
+`ppo_floor_v3`, log `checkpoints/floor_train_v3.log`, notifier `floor_progress_notify.py` (policy-alone eval every 30 min).
+v3 @4.9M policy alone: success 0/50, torso peak >0.7 m in 12/50, longest hold 3 of 20 steps; approx_kl 0.3 / clip_fraction
+0.75 (too high -- next candidate: lower learning rate + std floor); watching it, supine starts try a bent-leg get-up and prone
+starts a push-up. Resume: `cd scripts; ../.venv/bin/python train_floor.py --n-envs 8 --timesteps 20000000 --out ppo_floor_v3
+--floor-burst-rate 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_floor_v3_*_steps.zip | head -1)" >> ../checkpoints/floor_train_v3.log 2>&1 &`.
+Watch: `DISPLAY=:1 ../.venv/bin/python watch_floor.py <ckpt> [--only-success]` (keeps running 3 s after a success to show whether it holds).
 
 Why this approach (findings, 2026-10-11):
 - Harsh-only is ~entirely "cannot get up from the ground": of harsh starts that begin below
@@ -38,15 +119,17 @@ Why this approach (findings, 2026-10-11):
   the flattest starts that fail at x1; the unchanged v26 policy gains ~+20 points on crouched calm starts
   at gear x1.5 (but degrades at x2+ since it was trained at x1). Hence the x1.5 body spec (v28).
   Per-joint MPC sweep (only one group x1.5): knee 2/6, hip 1/6, hip+knee 2-3/6, ankle 1/6 vs 5/6 for all
-  limbs -- no single group reproduces it (waist/arms untested; n=6 is noisy). v28 early result (94.9M):
-  calm gate 52 (prev best 41), 300-seed calm 152 vs 123 at its start; harsh unchanged (5/197 end standing).
+  limbs -- no single group reproduces it (waist/arms untested; n=6 is noisy). v28 result: calm gate 47-54,
+  300-seed calm 152-154. CORRECT CONTROL = v21 @82.4M on the x1.5 body: calm 43 / full 24 / harsh 5,
+  136/300 calm, 6/197 harsh starts end upright (all starts at 0.6-0.7 m; 0/160 below 0.6 m). So v28's gain over
+  control is small (+16-18/300) and no harsh start below 0.6 m has ever ended upright.
 - recovery_gate (knee_straight/torso_upright off when low) is fine: v22 (no gate) vs v23 (gate) from
   the same init gave the same gates. Do not revert it.
 - Literature (Tao+ 2022 "Learning to Get Up", HumanUP 2025): curriculum + staged difficulty; HumanUP
   used ~5B steps, i.e. ~100x what we run. Strong-body-first is what v27 tries;
   a canonical-pose ladder (squat/kneel/sit/lie) is not yet tried.
-- Judge v28 by the gate snippet below (x1.5 body, the env default). Start-of-run baseline for v28 is its
-  init checkpoint on the same body: calm 41 / full 22 / harsh 5 (100 seeds). Also the 300-seed knee-bin
+- Judge v37 by the gate snippet below (x1.5 body, the env default). v28 reference on the same body: calm
+  47-54 / full 23-29 / harsh 6-9 (100 seeds); its init checkpoint was 41 / 22 / 5. Also the 300-seed knee-bin
   table of calm starts (crouched starts are the sensitive part).
 
 ## The one rule that matters most here
@@ -62,7 +145,7 @@ from stable_baselines3 import PPO
 from locomotion_env import LocomotionEnv
 from env import FALL_HEIGHT
 
-ckpt = max(glob.glob('checkpoints/autosave/ppo_stand_v28_body15_*_steps.zip'), key=os.path.getmtime)
+ckpt = max(glob.glob('checkpoints/autosave/ppo_stand_v37_ladder_*_steps.zip'), key=os.path.getmtime)
 model = PPO.load(ckpt, device='cpu')
 
 def gate(calm_frac, n=100):
@@ -92,25 +175,26 @@ print('harsh-only gate:', gate(0.0), '/100') # force every reset to a collapse s
 
 ```bash
 cd scripts
-LATEST=$(ls -t ../checkpoints/autosave/ppo_stand_v28_body15_*_steps.zip | head -1)
+LATEST=$(ls -t ../checkpoints/autosave/ppo_stand_v37_ladder_*_steps.zip | head -1)
 nohup ../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 60000000 --stand-only \
-  --out ppo_stand_v28_body15 \
+  --out ppo_stand_v37_ladder \
   --height-start-scale 6.0 --height-end-scale 15.0 --height-relax-frac 0.3 --height-already-relaxed \
   --curriculum-fall-gate 0.65 --curriculum-streak-gate 350 \
-  --calm-already-relaxed --calm-end-frac 0.6 \
+  --calm-already-relaxed --calm-end-frac 0.5 --knee-gate --head-record 400 \
+  --colored-noise-rho 0.9 --floor-noise-scale 1.0 --floor-burst-rate 0.1 --floor-burst-hold 10 \
+  --burst-archive-frac 0.25 --std-min 0.45 --ent-coef 0.002 \
   --init-from "$LATEST" \
-  >> ../checkpoints/locomotion_train_stand_v28.log 2>&1 &
+  >> ../checkpoints/locomotion_train_stand_v37.log 2>&1 &
 disown
 
-nohup ../.venv/bin/python stand_progress_notify.py --log ../checkpoints/locomotion_train_stand_v28.log \
-  --ckpt-glob '../checkpoints/autosave/ppo_stand_v28_body15_*_steps.zip' \
-  --total-timesteps 60000000 --interval-minutes 30 >> ../checkpoints/stand_progress_notify_v28.log 2>&1 &
+nohup ../.venv/bin/python stand_progress_notify.py --log ../checkpoints/locomotion_train_stand_v37.log \
+  --ckpt-glob '../checkpoints/autosave/ppo_stand_v37_ladder_*_steps.zip' \
+  --total-timesteps 60000000 --interval-minutes 30 >> ../checkpoints/stand_progress_notify_v37.log 2>&1 &
 disown
 ```
 `--calm-already-relaxed` matters just as much: without it a restart resets `calm_frac` to 1.0 (all
 calm) and re-anneals down, silently cutting harsh exposure for ~9M steps. `--calm-end-frac` sets the
-harsh/calm target (0.6 for v28; the env default is `CALM_EPISODE_FRAC` = 0.45). `--gear-curriculum` must be
-passed on every v27 resume (and `--gear-start` set to the last logged `gear/max`).
+harsh/calm target (0.6 for v28/v29; the env default is `CALM_EPISODE_FRAC` = 0.45). The x1.5 body is the env default (no flag); `--knee-gate --head-record 400 --colored-noise-rho 0.9 --floor-noise-scale 1.0 --floor-burst-rate 0.1 --floor-burst-hold 10 --burst-archive-frac 0.25 --std-min 0.45 --ent-coef 0.002` must be passed on every v37 resume (the archive is rebuilt from scratch after a restart; it is not saved).
 `--height-already-relaxed` matters: the height-reward scaffold has already ramped to 15.0; without
 this flag a continuation re-ramps it from 6.0. `--curriculum-fall-gate`/`--curriculum-streak-gate`
 are the loosened phase-1->phase-2 gate (default 0.1/500 is close to unreachable in practice --
@@ -126,7 +210,7 @@ checkpoint rather than continuing to chain.
 
 ```bash
 cd scripts
-ckpt=$(ls -t ../checkpoints/autosave/ppo_stand_v28_body15_*_steps.zip | head -1)
+ckpt=$(ls -t ../checkpoints/autosave/ppo_stand_v37_ladder_*_steps.zip | head -1)
 DISPLAY=:1 ../.venv/bin/python watch_locomotion.py "$ckpt"
 ```
 **`DISPLAY=:1`, not `:0`** -- this machine's X server runs on `:1` (`who` shows it). Resets are

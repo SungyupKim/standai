@@ -27,7 +27,7 @@ LOG_STD_MAX = np.log(0.6)
 
 class BreakdownCallback(BaseCallback):
     KEYS = ["height", "stability", "stance", "knee_avoid", "recovery", "jerk", "velocity", "gait", "brace", "com",
-            "stand_streak", "knee_straight", "torso_upright", "ground_height", "getup_shift", "getup_pen"]
+            "stand_streak", "knee_straight", "torso_upright", "ground_height", "getup_shift", "getup_pen", "head_progress", "head_record"]
 
     def __init__(self, window=100):
         super().__init__()
@@ -405,6 +405,178 @@ class GearCurriculumCallback(BaseCallback):
         self._last_sync = self.num_timesteps
 
 
+class ColoredNoiseCallback(BaseCallback):
+    """Temporally CORRELATED exploration noise, no policy change (checkpoints stay loadable).
+
+    PPO's default rollout action is mean + std * eps_t with eps_t independent every step; on a body that
+    low-passes its torques that averages out, so a ~10-step coordinated push never happens (measured:
+    scaling white noise x1..x3 left the share of floor starts whose head ever passes 0.5 m at 4-6%, while
+    correlated noise rose to 10%). Here eps_t follows a stationary AR(1) with correlation `rho`, so each
+    step's marginal is still N(0,1) and the stored log-prob is the policy's own. On envs currently on the
+    floor (torso z < `floor_z`) the noise is additionally multiplied by `floor_scale`; that part makes the
+    sampling distribution wider than the policy's (a small off-policy bias that PPO's ratio clipping
+    tolerates) and is deliberately limited to the floor so calm balance training is untouched.
+    Only rollout sampling is replaced -- policy.predict (evaluation, the gates) is unaffected."""
+
+    def __init__(self, rho=0.9, floor_scale=1.5, floor_z=0.5, burst_rate=0.0, burst_hold=10):
+        super().__init__()
+        self.rho, self.floor_scale, self.floor_z = rho, floor_scale, floor_z
+        # floor bursts: on envs lying on the floor, with per-step probability `burst_rate` (when idle) the
+        # limb actions are replaced by a random +-1 pattern held for `burst_hold` steps. Policy-free
+        # bang-bang holds of ~10 steps got the head above 0.5 m in 77% of floor starts (the policy: 6%).
+        self.burst_rate, self.burst_hold = burst_rate, burst_hold
+        self._orig_forward = None
+        self.low = None
+
+    def _on_training_start(self):
+        import torch as th
+        pol = self.model.policy
+        n, a_dim = self.training_env.num_envs, int(np.prod(pol.action_space.shape))
+        self.eps = th.randn(n, a_dim)
+        self.low = th.zeros(n, dtype=th.bool)
+        self.burst_left = th.zeros(n, dtype=th.long)
+        self.burst_act = th.zeros(n, a_dim)
+        self.burst_active_frac = 0.0
+        self.override_mask = None
+        self._orig_forward = pol.forward
+        venv = self.training_env
+        self._orig_step_async = venv.step_async
+        outer0 = self
+
+        def step_async(actions):
+            m = outer0.override_mask
+            if m is not None and bool(m.any()):
+                actions = np.array(actions, copy=True)
+                mm = m.numpy()
+                actions[mm] = np.clip(outer0.burst_act.numpy()[mm], -1.0, 1.0)
+            outer0.override_mask = None
+            return outer0._orig_step_async(actions)
+
+        venv.step_async = step_async
+        rho, sc = self.rho, self.floor_scale
+        outer = self
+
+        def forward(obs, deterministic=False):
+            if deterministic or obs.shape[0] != n:
+                return outer._orig_forward(obs, deterministic)
+            features = pol.extract_features(obs)
+            if pol.share_features_extractor:
+                latent_pi, latent_vf = pol.mlp_extractor(features)
+            else:
+                pi_f, vf_f = features
+                latent_pi, latent_vf = pol.mlp_extractor.forward_actor(pi_f), pol.mlp_extractor.forward_critic(vf_f)
+            values = pol.value_net(latent_vf)
+            dist = pol._get_action_dist_from_latent(latent_pi)
+            outer.eps = rho * outer.eps + (1.0 - rho ** 2) ** 0.5 * th.randn_like(outer.eps)
+            scale = th.where(outer.low, th.full((n,), sc), th.ones(n)).unsqueeze(1).to(obs.device)
+            actions = dist.distribution.mean + scale * dist.distribution.stddev * outer.eps.to(obs.device)
+            if outer.burst_rate > 0.0:
+                idle = outer.low & (outer.burst_left == 0)
+                start = idle & (th.rand(n) < outer.burst_rate)
+                if start.any():
+                    new = th.sign(th.randn(n, a_dim))
+                    new[:, 0] = 0.0                        # action 0 (root_x) is zeroed in stand-only anyway
+                    outer.burst_act[start] = new[start]
+                    outer.burst_left[start] = outer.burst_hold
+                active = outer.low & (outer.burst_left > 0)
+                # NOT stored as the policy's action: a +-1 pattern is far out in the policy's tails and blew up
+                # PPO's importance ratios (approx_kl ~1e6 -> NaN, first v33 attempt). The policy keeps its own
+                # on-policy sample; the override is applied to the env in step_async below, i.e. the burst acts as
+                # an environment disturbance that creates raised-head states for the policy to continue from.
+                outer.override_mask = active.clone()
+                outer.burst_left = th.where(active, outer.burst_left - 1, th.zeros_like(outer.burst_left))
+                outer.burst_active_frac = float(active.float().mean())
+            log_prob = dist.log_prob(actions)
+            return actions.reshape((-1, *pol.action_space.shape)), values, log_prob
+
+        pol.forward = forward
+
+    def _on_step(self):
+        import torch as th
+        infos, dones = self.locals["infos"], self.locals["dones"]
+        for i, info in enumerate(infos):
+            self.low[i] = bool(info.get("torso_z", 1.0) < self.floor_z)
+            if dones[i]:
+                self.eps[i] = th.randn(self.eps.shape[1])     # new episode: fresh stationary draw
+                self.burst_left[i] = 0
+        return True
+
+    def _on_rollout_end(self):
+        self.logger.record("noise/floor_env_frac", float(self.low.float().mean()))
+        self.logger.record("noise/burst_active_frac", self.burst_active_frac)
+
+    def _on_training_end(self):
+        if self._orig_forward is not None:
+            del self.model.policy.forward              # drop the instance override -> class forward again
+            if '_orig_step_async' in self.__dict__ and 'step_async' in self.training_env.__dict__:
+                del self.training_env.step_async       # back to the VecEnv's own step_async
+
+
+class BurstArchiveCallback(BaseCallback):
+    """Archive of high-head states reached from the floor, replayed as episode starts (pure RL: a reset
+    distribution, no off-policy actions). The env reports states with the head 0.25-1.10 m, a foot down and the
+    torso not inverted, that are at least ARCHIVE_GAIN above where THAT episode started (info["archive_state"]) --
+    from floor starts AND from archive-started episodes, so each rung seeds the next one (Go-Explore-style frontier);
+    they are kept in head-height bins so no bin starves, and every `sync_every` steps handed back to the envs via set_replay_pool: a fraction
+    `frac` of ALL resets then loads one of them, so the policy practises 'continue from sitting / kneeling' where the
+    body can demonstrably get to from a lying start. Logs archive/size and the share of archive-started episodes that
+    hold a 3 s stand (archive/success_replayed)."""
+
+    BINS = (0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.90, 1.10)   # lying -> just stood up (7 rungs)
+
+    def __init__(self, frac=0.25, cap_per_bin=1500, sync_every=50_000, min_pool=200):
+        super().__init__()
+        self.frac, self.cap, self.sync_every, self.min_pool = frac, cap_per_bin, sync_every, min_pool
+        self.bins = [deque(maxlen=cap_per_bin) for _ in range(len(self.BINS) - 1)]
+        self._streak = None
+        self._last_sync = 0
+        self._recent = deque(maxlen=300)
+
+    def _on_training_start(self):
+        self._streak = np.zeros(self.training_env.num_envs)
+        self._last_sync = self.num_timesteps
+        self.training_env.env_method("set_archive_collect", True)
+        self.training_env.env_method("set_replay_pool", [], self.frac)
+
+    def _on_step(self):
+        for i, info in enumerate(self.locals["infos"]):
+            self._streak[i] = max(self._streak[i], info.get("stand_streak_steps", 0))
+            st = info.get("archive_state")
+            if st is not None:
+                q, v, hz = st
+                b = int(np.digitize(hz, self.BINS)) - 1
+                if 0 <= b < len(self.bins):
+                    self.bins[b].append((q, v, False))
+            if self.locals["dones"][i]:
+                start = info.get("episode_start")
+                if start is not None and start.get("replayed"):
+                    self._recent.append(1.0 if self._streak[i] >= STAND_STREAK_REF else 0.0)
+                self._streak[i] = 0.0
+        if self.num_timesteps - self._last_sync >= self.sync_every:
+            self._sync()
+        return True
+
+    def _sync(self):
+        sizes = [len(b) for b in self.bins]
+        if sum(sizes) >= self.min_pool:
+            # equal weight per head-height bin (low poses are far more common; sampling with replacement
+            # lets the rarer, higher bins count as much as the common low one)
+            rng = np.random.default_rng(self.num_timesteps)
+            target = min(max(sizes), 600)
+            pool = []
+            for b in self.bins:
+                if len(b):
+                    idx = rng.choice(len(b), size=target, replace=len(b) < target)
+                    pool.extend(b[j] for j in idx)
+            self.training_env.env_method("set_replay_pool", pool, self.frac)
+        self.logger.record("archive/size", sum(sizes))
+        for k, n in enumerate(sizes):
+            self.logger.record(f"archive/bin{k}_{self.BINS[k]:.2f}m", n)
+        if self._recent:
+            self.logger.record("archive/success_replayed", float(np.mean(self._recent)))
+        self._last_sync = self.num_timesteps
+
+
 class FallRateCallback(BaseCallback):
     """Fraction of completed episodes that ended via a_out (failed to recover within
     DOWN_RECOVERY_STEPS) rather than truncation at MAX_STEPS -- the direct metric this
@@ -424,6 +596,7 @@ class FallRateCallback(BaseCallback):
 
 
 def main():
+    global LOG_STD_MIN
     parser = argparse.ArgumentParser()
     parser.add_argument("--timesteps", type=int, default=5_000_000)
     parser.add_argument("--n-envs", type=int, default=4)
@@ -452,6 +625,33 @@ def main():
                          help="LocomotionEnv getup_reward: implies --ground-shaping, plus foot-contact-"
                               "gated height, weight-shift term, head-contact/inversion penalties, and "
                               "upright-only stand_streak -- only meaningful with --stand-only")
+    parser.add_argument("--head-progress", type=float, default=0.0,
+                         help="K for the potential-based head-height progress reward (pays for RISING; "
+                              "0 = off). Head height is capped at 0.9 m; stand-only only")
+    parser.add_argument("--head-record", type=float, default=0.0,
+                         help="K for the head-height RECORD bonus: pays K * (new best head height - previous "
+                              "best) once per height per episode, only with a foot on the floor (0 = off; "
+                              "stand-only). Not cancelled by falling back, not farmable by bobbing")
+    parser.add_argument("--colored-noise-rho", type=float, default=0.0,
+                         help="ColoredNoiseCallback: AR(1) correlation of the rollout exploration noise "
+                              "(0 = off = SB3's independent-per-step noise)")
+    parser.add_argument("--floor-noise-scale", type=float, default=1.5,
+                         help="with --colored-noise-rho: extra multiplier on the noise for envs whose torso is "
+                              "below 0.5 m (1.0 = none)")
+    parser.add_argument("--floor-burst-rate", type=float, default=0.0,
+                         help="with --colored-noise-rho: per-step probability (when idle) that an env lying on "
+                              "the floor switches to a random +-1 limb pattern held --floor-burst-hold steps "
+                              "(0 = off). ~0.1 puts about half of the floor time in bursts")
+    parser.add_argument("--floor-burst-hold", type=int, default=10)
+    parser.add_argument("--burst-archive-frac", type=float, default=0.0,
+                         help="BurstArchiveCallback: fraction of resets that start from archived high-head "
+                              "states reached from the floor (0 = off; stand-only)")
+    parser.add_argument("--std-min", type=float, default=None,
+                         help="raise the lower bound of the policy action std (default keeps 0.05); also applied "
+                              "once at load so a shrunken std is lifted immediately")
+    parser.add_argument("--knee-gate", action="store_true",
+                         help="fade the knee_avoid reward out by head height (0 below 0.5 m, full at 0.9 m) so "
+                              "raising the legs while lying isn't paid -- only meaningful with --stand-only")
     parser.add_argument("--replay-curriculum", action="store_true",
                          help="ReplayCurriculumCallback: replay failed start states from buckets of "
                               "intermediate difficulty (only meaningful with --stand-only)")
@@ -493,7 +693,10 @@ def main():
     vec_env = make_vec_env(LocomotionEnv, n_envs=args.n_envs, vec_env_cls=SubprocVecEnv,
                            env_kwargs={"stand_only": args.stand_only,
                                        "ground_shaping": args.ground_shaping,
-                                       "getup_reward": args.getup_reward})
+                                       "getup_reward": args.getup_reward,
+                                       "knee_gate": args.knee_gate,
+                                       "head_progress": args.head_progress,
+                                       "head_record": args.head_record})
 
     if args.init_from:
         custom_objects = {"ent_coef": args.ent_coef} if args.ent_coef is not None else None
@@ -505,6 +708,14 @@ def main():
             kwargs["ent_coef"] = args.ent_coef
         model = PPO("MlpPolicy", vec_env, device=args.device, verbose=1, **kwargs)
         print("[locomotion] training from scratch", flush=True)
+
+    if args.std_min is not None:
+        LOG_STD_MIN = float(np.log(args.std_min))
+        with torch.no_grad():
+            before_std = model.policy.log_std.exp().mean().item()
+            model.policy.log_std.data.clamp_(min=LOG_STD_MIN, max=LOG_STD_MAX)
+            print(f"[locomotion] std floor {args.std_min}: mean action std {before_std:.3f} -> "
+                  f"{model.policy.log_std.exp().mean().item():.3f}", flush=True)
 
     checkpoint_callback = CheckpointCallback(
         save_freq=max(args.save_freq // args.n_envs, 1),
@@ -529,6 +740,11 @@ def main():
                                           already_relaxed=args.height_already_relaxed))
     if args.stand_only and args.replay_curriculum:
         callback_list.append(ReplayCurriculumCallback(frac=args.replay_frac))
+    if args.stand_only and args.burst_archive_frac > 0.0:
+        callback_list.append(BurstArchiveCallback(frac=args.burst_archive_frac))
+    if args.colored_noise_rho > 0.0:
+        callback_list.append(ColoredNoiseCallback(rho=args.colored_noise_rho, floor_scale=args.floor_noise_scale,
+                                                    burst_rate=args.floor_burst_rate, burst_hold=args.floor_burst_hold))
     if args.stand_only and args.gear_curriculum:
         callback_list.append(GearCurriculumCallback(start_max=args.gear_start))
     callbacks = CallbackList(callback_list)
