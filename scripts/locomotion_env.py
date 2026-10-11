@@ -205,13 +205,61 @@ COM_MARGIN_REF = 0.10          # m inside the support edge at which the reward s
 # comment there), ramping up to the full scale once that streak reaches the gate's own
 # 3-second (150-step) window, and dropping back to 0 the instant the streak breaks -- so every
 # fall now costs whatever streak had been built up, not just a brief dip in height/stability.
+# ---- ground shaping (stand-only, opt-in via ground_shaping=True, 2026-10-11) ----
+# Measured per-step reward by torso height on harsh starts (v23, 111.5M steps): lying flat
+# (z<0.2) paid 2.58/step vs 1.96 at 0.2-0.35 -- a valley, so a partial rise cost reward. The
+# gap was mostly com_reward (0.82 flat vs 0.28 -- a support-polygon term that means nothing
+# lying down), and height's squared head ratio has almost no slope when low (~2.2/m at head
+# z=0.3 vs ~7/m standing; 0.11->0.33 across the whole 0-0.5m torso range). So: gate com_reward
+# by recovery_gate like knee_straight/torso_upright, and add a linear low-height term that
+# saturates at GROUND_HEIGHT_REF (flat above it, so standing-range rewards are untouched).
+# knee_avoid is deliberately NOT gated -- it pays for knee height, which is the tucked-leg
+# posture getting up actually needs.
+GROUND_HEIGHT_SCALE = 3.0
+GROUND_HEIGHT_REF = 0.8        # head z (m) at which the linear term saturates
+
+# ---- getup reward (stand-only, opt-in via getup_reward=True, 2026-10-11) ----
+# Mirrors the cost that made a receding-horizon planner (predictive sampling, exact physics)
+# actually stand up from flat starts (2/6 solved; open-loop CEM with torso-z or cos(pitch)
+# objectives never did -- it found headstands, mid-air leaps, or stalled at sitting height):
+#  - head-height credit only while a foot is on the ground (no airborne / head-supported credit)
+#  - weight-shift term: while low and foot-supported, reward COM near the feet (sit-to-stand
+#    needs the COM over the feet before pushing up)
+#  - penalties for the head touching the ground and for an inverted torso
+#  - stand_streak only counts UPRIGHT standing (pitch + head height), not just torso z
+#  - no pitch credit while low -- the forward lean mid-rise is not penalised
+# ---- body spec (2026-10-11) ----
+# Limb actuator gears are multiplied by BODY_GEAR_SCALE for every LocomotionEnv. Measured: with
+# the original gears (x1) a closed-loop MPC oracle stands from only 2/6 lying starts; at x1.5 it
+# stands 5/6, and an unchanged policy gains ~+10 points overall on calm starts without losing the
+# upright ones (x2+ breaks that policy). So x1.5 is the default body from v28 on. All results in
+# docs/experiments_2026-10-11.md before v28 are at x1: set STANDAI_BODY_GEAR=1 to reproduce them.
+import os as _os
+BODY_GEAR_SCALE = float(_os.environ.get("STANDAI_BODY_GEAR", "1.5"))
+
+REPLAY_JITTER_RAD = 0.03       # joint jitter applied to replayed start states (failed-start replay)
+
+GETUP_SHIFT_SCALE = 1.0
+GETUP_SHIFT_REF = 0.5          # m of COM-to-feet horizontal offset at which the term reaches 0
+GETUP_SHIFT_MAX_Z = 0.55       # torso z below which the weight-shift term applies
+GETUP_HEAD_CONTACT_PEN = 1.0
+GETUP_INVERT_PEN = 1.0
+GETUP_INVERT_DEG = 120.0
+GETUP_UPRIGHT_DEG = 40.0       # stand_streak requires |torso pitch| below this ...
+GETUP_UPRIGHT_HEAD_Z = 0.9     # ... and head at least this high
+_FOOT_BODIES = ('foot_l', 'foot_r', 'toe_l', 'toe_r')
+
 STAND_STREAK_SCALE = 3.0       # matches HEAD_HEIGHT_REWARD_SCALE's max -- meant to dominate
 STAND_STREAK_REF = 150         # steps (3s) -- same window the eval gate uses
 
 
 class LocomotionEnv(Fighter2DEnv):
-    def __init__(self, render_mode=None, stand_only=False):
+    def __init__(self, render_mode=None, stand_only=False, ground_shaping=False, getup_reward=False):
         self._stand_only = stand_only
+        # getup_reward implies ground_shaping and adds the foot-contact / weight-shift / exploit
+        # terms below
+        self._getup = getup_reward and stand_only
+        self._ground_shaping = (ground_shaping or getup_reward) and stand_only
         if stand_only:
             # standing has to be learned from the legs and arms alone -- the always-on torso PD
             # assist (env.py BALANCE_KP/KD) would otherwise carry the balance (docs 10.5x: with it
@@ -288,6 +336,27 @@ class LocomotionEnv(Fighter2DEnv):
         # Instance attribute (not the bare module constant) so set_calm_frac() can anneal it
         # per-run via env_method, same pattern as the knee floor / velocity assist scaffolds.
         self._calm_frac = CALM_EPISODE_FRAC
+        self._replay_pool = []
+        self._replay_frac = 0.0
+        self._replayed = False
+        self._start_info = None
+        # gear curriculum (strong-body-first): each reset draws a gear multiplier from
+        # [1, _gear_max] for the 'a' limb actuators (root_x/root_ry are zeroed in stand_only).
+        # _gear_max == 1.0 (default) leaves the model untouched.
+        self._gear_max = 1.0
+        self._gear_scale = 1.0
+        self._gear_idx = [i for i in range(self.model.nu)
+                          if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or '').startswith('a_')
+                          and 'root' not in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)]
+        self.model.actuator_gear[self._gear_idx, 0] *= BODY_GEAR_SCALE   # body spec
+        self._gear_base = self.model.actuator_gear[:, 0].copy()          # gear curriculum scales this
+        self._a_hinge_limits = []
+        for j in range(self.model.njnt):
+            jname = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)
+            if (jname and jname.startswith('a_') and 'root' not in jname
+                    and self.model.jnt_type[j] == mujoco.mjtJoint.mjJNT_HINGE and self.model.jnt_limited[j]):
+                lo, hi = self.model.jnt_range[j]
+                self._a_hinge_limits.append((int(self.model.jnt_qposadr[j]), float(lo), float(hi)))
 
         self._a_bodies = [i for i in range(self.model.nbody) if self.model.body(i).name.startswith("a_")]
         self._a_masses = np.array([self.model.body_mass[i] for i in self._a_bodies])
@@ -327,6 +396,27 @@ class LocomotionEnv(Fighter2DEnv):
         class's __init__ does for BALANCE_KP/STABILITY_REWARD_SCALE, just now adjustable
         mid-run instead of fixed once at construction."""
         env_module.HEAD_HEIGHT_REWARD_SCALE = scale
+
+    def _getup_contacts(self):
+        """(foot_down, head_down): any 'a' foot/toe body, resp. the head, touching a non-fighter
+        geom (the floor)."""
+        m, d = self.model, self.data
+        names = getattr(self, '_geom_body_names', None)
+        if names is None:
+            names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, m.geom_bodyid[g]) or ''
+                     for g in range(m.ngeom)]
+            self._geom_body_names = names
+        foot = head = 0.0
+        for i in range(d.ncon):
+            c = d.contact[i]
+            n1, n2 = names[c.geom1], names[c.geom2]
+            for n, o in ((n1, n2), (n2, n1)):
+                if n.startswith('a_') and not (o.startswith('a_') or o.startswith('b_')):
+                    if n[2:] in _FOOT_BODIES:
+                        foot = 1.0
+                    elif n[2:] == 'head':
+                        head = 1.0
+        return foot, head
 
     def _obs(self):
         com_x = np.sum(self._a_masses * self.data.xipos[self._a_bodies, 0]) / self._a_masses.sum()
@@ -374,6 +464,8 @@ class LocomotionEnv(Fighter2DEnv):
 
     def reset(self, seed=None, options=None):
         obs, info = super().reset(seed=seed, options=options)
+        self._gear_scale = 1.0 if self._gear_max <= 1.0 else float(self.np_random.uniform(1.0, self._gear_max))
+        self.model.actuator_gear[self._gear_idx, 0] = self._gear_base[self._gear_idx] * self._gear_scale
 
         self.data.qpos[self._b_root_x_qpos] = B_PARK_X
         # Two-tier curriculum (docs 10.36): measured that falls happen mostly during
@@ -419,9 +511,46 @@ class LocomotionEnv(Fighter2DEnv):
         if self.np_random.random() < push_prob:
             self.data.qvel[self._a_root_x_dof] += self.np_random.uniform(-2.5, 2.5)
 
+        # failed-start replay (opt-in via set_replay_pool; empty pool = no behaviour change)
+        self._replayed = False
+        if self._replay_pool and self.np_random.random() < self._replay_frac:
+            self._load_replay_state(self._replay_pool[int(self.np_random.integers(len(self._replay_pool)))])
+        self._record_start_state()
+
         self._resample_target_vx()
         mujoco.mj_forward(self.model, self.data)
         return self._obs(), info
+
+    def set_replay_pool(self, pool, frac):
+        """pool: list of (qpos, qvel, is_calm) start states from episodes the policy failed, kept
+        only for clusters of intermediate difficulty (ReplayCurriculumCallback). Each reset then
+        loads one of them with probability `frac`. Same env_method broadcast as set_calm_frac."""
+        self._replay_pool = list(pool)
+        self._replay_frac = float(frac)
+
+    def set_gear_scale_max(self, scale_max):
+        """Upper end of the per-episode gear multiplier range (1.0 = nominal body only)."""
+        self._gear_max = float(scale_max)
+
+    def _load_replay_state(self, entry):
+        qpos, qvel, calm = entry
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = qvel
+        # small joint jitter so the policy can't just memorise a handful of exact states
+        for adr, lo, hi in self._a_hinge_limits:
+            self.data.qpos[adr] = np.clip(self.data.qpos[adr] + self.np_random.normal(0.0, REPLAY_JITTER_RAD), lo, hi)
+        self._episode_knee_floor = self._min_knee_deg if calm else None
+        self._is_calm = calm
+        self._stand_streak = 0
+        self._replayed = True
+        mujoco.mj_forward(self.model, self.data)
+
+    def _record_start_state(self):
+        """Snapshot of the state this episode starts from; step() attaches it to the terminal info."""
+        self._start_info = dict(
+            qpos=self.data.qpos.copy(), qvel=self.data.qvel.copy(), calm=bool(self._is_calm),
+            knee=float(np.degrees(min(self.data.qpos[self._knee_r_qpos], self.data.qpos[self._knee_l_qpos]))),
+            z=float(self.data.xpos[self.a_torso_id][2]), replayed=self._replayed, gear=self._gear_scale)
 
     def step(self, action):
         if self._stand_only:
@@ -546,9 +675,30 @@ class LocomotionEnv(Fighter2DEnv):
             lo, hi = min(feet_x) - 0.12, max(feet_x) + 0.12
             margin = min(com_x - lo, hi - com_x)
             com_reward = COM_REWARD_SCALE * min(1.0, max(0.0, margin / COM_MARGIN_REF))
+            if self._ground_shaping:
+                com_reward *= recovery_gate
+        ground_height_reward = 0.0
+        getup_shift_reward = 0.0
+        getup_penalty = 0.0
+        upright_ok = True
+        if self._ground_shaping:
+            head_z = self.data.xpos[self.a_head_id][2]
+            ground_height_reward = GROUND_HEIGHT_SCALE * min(1.0, max(0.0, head_z / GROUND_HEIGHT_REF))
+        if self._getup:
+            foot_down, head_down = self._getup_contacts()
+            ground_height_reward *= foot_down
+            torso_z = self.data.xpos[self.a_torso_id][2]
+            if foot_down and torso_z < GETUP_SHIFT_MAX_Z:
+                dx = abs(com_x - np.mean(feet_x))
+                getup_shift_reward = GETUP_SHIFT_SCALE * min(1.0, max(0.0, 1.0 - dx / GETUP_SHIFT_REF))
+            pitch = self.data.qpos[self.a_ry_qpos]
+            wrapped = (pitch + np.pi) % (2 * np.pi) - np.pi
+            getup_penalty = (GETUP_HEAD_CONTACT_PEN * head_down
+                             + GETUP_INVERT_PEN * float(abs(wrapped) > np.deg2rad(GETUP_INVERT_DEG)))
+            upright_ok = bool(abs(wrapped) < np.deg2rad(GETUP_UPRIGHT_DEG) and head_z >= GETUP_UPRIGHT_HEAD_Z)
         stand_streak_reward = 0.0
         if self._stand_only:
-            if self.data.xpos[self.a_torso_id][2] >= FALL_HEIGHT:
+            if self.data.xpos[self.a_torso_id][2] >= FALL_HEIGHT and upright_ok:
                 self._stand_streak += 1
             else:
                 self._stand_streak = 0
@@ -556,7 +706,10 @@ class LocomotionEnv(Fighter2DEnv):
             info["stand_streak_steps"] = self._stand_streak  # raw step count, uncapped -- for
                                                               # curriculum gating (CurriculumGateCallback)
         reward = (reward + velocity_reward + gait_reward + brace_reward + com_reward
-                  + stand_streak_reward + knee_straight_reward + torso_upright_reward)
+                  + stand_streak_reward + knee_straight_reward + torso_upright_reward
+                  + ground_height_reward + getup_shift_reward - getup_penalty)
+        info["reward_breakdown"]["getup_shift"] = getup_shift_reward
+        info["reward_breakdown"]["getup_pen"] = -getup_penalty
         info["reward_breakdown"]["velocity"] = velocity_reward
         info["reward_breakdown"]["gait"] = gait_reward
         info["reward_breakdown"]["brace"] = brace_reward
@@ -564,7 +717,10 @@ class LocomotionEnv(Fighter2DEnv):
         info["reward_breakdown"]["stand_streak"] = stand_streak_reward
         info["reward_breakdown"]["knee_straight"] = knee_straight_reward
         info["reward_breakdown"]["torso_upright"] = torso_upright_reward
+        info["reward_breakdown"]["ground_height"] = ground_height_reward
         info["target_vx"] = self._target_vx
+        if (terminated or truncated) and self._start_info is not None:
+            info["episode_start"] = self._start_info
 
         if RESAMPLE_EVERY_STEPS is not None and self.step_count % RESAMPLE_EVERY_STEPS == 0:
             self._resample_target_vx()

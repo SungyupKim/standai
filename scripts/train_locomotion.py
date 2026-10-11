@@ -15,7 +15,7 @@ from stable_baselines3.common.callbacks import BaseCallback, CallbackList, Check
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv
 
-from locomotion_env import CALM_EPISODE_FRAC, LocomotionEnv
+from locomotion_env import CALM_EPISODE_FRAC, LocomotionEnv, STAND_STREAK_REF
 
 MODELS_DIR = pathlib.Path(__file__).resolve().parent.parent / "checkpoints"
 
@@ -27,7 +27,7 @@ LOG_STD_MAX = np.log(0.6)
 
 class BreakdownCallback(BaseCallback):
     KEYS = ["height", "stability", "stance", "knee_avoid", "recovery", "jerk", "velocity", "gait", "brace", "com",
-            "stand_streak", "knee_straight", "torso_upright"]
+            "stand_streak", "knee_straight", "torso_upright", "ground_height", "getup_shift", "getup_pen"]
 
     def __init__(self, window=100):
         super().__init__()
@@ -276,6 +276,135 @@ class CurriculumGateCallback(LinearScaffoldCallback):
         return True
 
 
+class ReplayCurriculumCallback(BaseCallback):
+    """Failed-start replay with an intermediate-difficulty filter (a cheap reverse curriculum).
+
+    Every finished episode reports the state it started from (LocomotionEnv puts it in
+    info["episode_start"]) and whether it held a 3s continuous stand. Starts are bucketed by
+    (initial knee bend, initial torso height) -- the two things that separated winners from
+    losers in the calm measurements. Per bucket we keep a rolling success rate and the start
+    states of the episodes that FAILED. Every `sync_every` steps the pool handed to the envs is
+    the failed starts from buckets whose success rate is in [lo, hi]: buckets at ~0% are
+    skipped (nothing learnable there yet -- that's the harsh problem again) and so are buckets
+    that are already solved. As a bucket improves past `hi` it graduates out and the pool
+    drifts toward harder starts on its own. A fraction `frac` of resets load from the pool; the
+    rest keep the normal distribution so easy/upright starts aren't forgotten."""
+
+    KNEE_EDGES = [-90.0, -60.0, -40.0, -25.0, -10.0]       # deg, min knee at episode start
+    Z_EDGES = [0.9, 1.0, 1.08, 1.12, 1.16]                  # m, torso z at episode start
+
+    def __init__(self, frac=0.3, sync_every=50_000, lo=0.10, hi=0.70, min_n=20, window=40,
+                 per_bucket_cap=200, max_pool=3000):
+        super().__init__()
+        self.frac, self.sync_every, self.lo, self.hi = frac, sync_every, lo, hi
+        self.min_n, self.window, self.cap, self.max_pool = min_n, window, per_bucket_cap, max_pool
+        self._outcomes = {}   # bucket -> deque of 0/1 success
+        self._fails = {}      # bucket -> deque of (qpos, qvel, calm) of failed, non-replayed starts
+        self._recent_replayed = deque(maxlen=200)
+        self._recent_fresh = deque(maxlen=200)
+        self._streak = None
+        self._last_sync = 0
+
+    def _on_training_start(self):
+        self._streak = np.zeros(self.training_env.num_envs)
+        self._last_sync = self.num_timesteps
+        self.training_env.env_method("set_replay_pool", [], self.frac)
+
+    def _bucket(self, start):
+        return (int(np.digitize(start["knee"], self.KNEE_EDGES)), int(np.digitize(start["z"], self.Z_EDGES)))
+
+    def _on_step(self):
+        for i, info in enumerate(self.locals["infos"]):
+            self._streak[i] = max(self._streak[i], info.get("stand_streak_steps", 0))
+            if not self.locals["dones"][i]:
+                continue
+            start = info.get("episode_start")
+            ok = self._streak[i] >= STAND_STREAK_REF
+            self._streak[i] = 0.0
+            if start is None:
+                continue
+            b = self._bucket(start)
+            self._outcomes.setdefault(b, deque(maxlen=self.window)).append(1.0 if ok else 0.0)
+            (self._recent_replayed if start["replayed"] else self._recent_fresh).append(1.0 if ok else 0.0)
+            if not ok and not start["replayed"]:
+                self._fails.setdefault(b, deque(maxlen=self.cap)).append((start["qpos"], start["qvel"], start["calm"]))
+        if self.num_timesteps - self._last_sync >= self.sync_every:
+            self._sync()
+        return True
+
+    def _sync(self):
+        pool, used = [], 0
+        for b, out in self._outcomes.items():
+            if len(out) >= self.min_n and self.lo <= np.mean(out) <= self.hi and self._fails.get(b):
+                pool.extend(self._fails[b]); used += 1
+        if len(pool) > self.max_pool:
+            idx = np.random.default_rng(self.num_timesteps).choice(len(pool), self.max_pool, replace=False)
+            pool = [pool[j] for j in idx]
+        self.training_env.env_method("set_replay_pool", pool, self.frac)
+        self.logger.record("replay/pool_size", len(pool))
+        self.logger.record("replay/buckets_in_band", used)
+        self.logger.record("replay/buckets_seen", len(self._outcomes))
+        if self._recent_replayed:
+            self.logger.record("replay/success_replayed", float(np.mean(self._recent_replayed)))
+        if self._recent_fresh:
+            self.logger.record("replay/success_fresh", float(np.mean(self._recent_fresh)))
+        self._last_sync = self.num_timesteps
+
+
+class GearCurriculumCallback(BaseCallback):
+    """Strong-body-first curriculum (after Tao et al. 2022, "Learning to Get Up"): every episode draws
+    a gear multiplier from [1, gear_max] for the limb actuators, so nominal-strength (x1) episodes are
+    always in the mix and the policy can't specialise to brute force. gear_max starts high and steps
+    down by `step` whenever the success rate of the UPPER half of the gear range (calm episodes only
+    -- harsh ones are ~0% and would block the schedule forever) reaches `gate`. Evaluate with the
+    gate snippet only -- it always uses the nominal body."""
+
+    def __init__(self, start_max=2.0, step=0.05, gate=0.5, sync_every=50_000, window=200, min_n=100):
+        super().__init__()
+        self.cur_max, self.step, self.gate = start_max, step, gate
+        self.sync_every, self.window, self.min_n = sync_every, window, min_n
+        self._upper = deque(maxlen=window)
+        self._nominal = deque(maxlen=window)
+        self._streak = None
+        self._last_sync = 0
+
+    def _on_training_start(self):
+        self._streak = np.zeros(self.training_env.num_envs)
+        self._last_sync = self.num_timesteps
+        self.training_env.env_method("set_gear_scale_max", self.cur_max)
+
+    def _on_step(self):
+        for i, info in enumerate(self.locals["infos"]):
+            self._streak[i] = max(self._streak[i], info.get("stand_streak_steps", 0))
+            if not self.locals["dones"][i]:
+                continue
+            ok = 1.0 if self._streak[i] >= STAND_STREAK_REF else 0.0
+            self._streak[i] = 0.0
+            start = info.get("episode_start")
+            if start is None or not start["calm"]:
+                continue
+            g = start.get("gear", 1.0)
+            if g >= (1.0 + self.cur_max) / 2.0 and self.cur_max > 1.0:
+                self._upper.append(ok)
+            if g <= 1.1:
+                self._nominal.append(ok)
+        if self.num_timesteps - self._last_sync >= self.sync_every:
+            self._sync()
+        return True
+
+    def _sync(self):
+        if self.cur_max > 1.0 and len(self._upper) >= self.min_n and np.mean(self._upper) >= self.gate:
+            self.cur_max = max(1.0, round(self.cur_max - self.step, 3))
+            self._upper.clear()
+            self.training_env.env_method("set_gear_scale_max", self.cur_max)
+        self.logger.record("gear/max", self.cur_max)
+        if self._upper:
+            self.logger.record("gear/success_upper_half", float(np.mean(self._upper)))
+        if self._nominal:
+            self.logger.record("gear/success_nominal", float(np.mean(self._nominal)))
+        self._last_sync = self.num_timesteps
+
+
 class FallRateCallback(BaseCallback):
     """Fraction of completed episodes that ended via a_out (failed to recover within
     DOWN_RECOVERY_STEPS) rather than truncation at MAX_STEPS -- the direct metric this
@@ -316,6 +445,26 @@ def main():
     parser.add_argument("--calm-already-relaxed", action="store_true",
                          help="same as --knee-already-relaxed, for the stand-only calm-episode-"
                               "fraction curriculum (only meaningful with --stand-only)")
+    parser.add_argument("--ground-shaping", action="store_true",
+                         help="enable LocomotionEnv ground_shaping (com gated by recovery_gate + "
+                              "linear low-height reward) -- only meaningful with --stand-only")
+    parser.add_argument("--getup-reward", action="store_true",
+                         help="LocomotionEnv getup_reward: implies --ground-shaping, plus foot-contact-"
+                              "gated height, weight-shift term, head-contact/inversion penalties, and "
+                              "upright-only stand_streak -- only meaningful with --stand-only")
+    parser.add_argument("--replay-curriculum", action="store_true",
+                         help="ReplayCurriculumCallback: replay failed start states from buckets of "
+                              "intermediate difficulty (only meaningful with --stand-only)")
+    parser.add_argument("--gear-curriculum", action="store_true",
+                         help="GearCurriculumCallback: per-episode gear multiplier in [1, gear_max], gear_max "
+                              "stepped down by success (only meaningful with --stand-only)")
+    parser.add_argument("--gear-start", type=float, default=2.0,
+                         help="initial gear_max for --gear-curriculum (use the logged gear/max when resuming)")
+    parser.add_argument("--replay-frac", type=float, default=0.3,
+                         help="fraction of resets drawn from the failed-start pool")
+    parser.add_argument("--calm-end-frac", type=float, default=None,
+                         help="CurriculumGateCallback phase-2 target calm fraction -- default is "
+                              "locomotion_env.CALM_EPISODE_FRAC; lower = more harsh/collapse starts")
     parser.add_argument("--height-already-relaxed", action="store_true",
                          help="same as --knee-already-relaxed, for the stand-only head-height "
                               "reward scaffold (only meaningful with --stand-only)")
@@ -342,7 +491,9 @@ def main():
     run_name = f"{args.out}_{run_id}"
 
     vec_env = make_vec_env(LocomotionEnv, n_envs=args.n_envs, vec_env_cls=SubprocVecEnv,
-                           env_kwargs={"stand_only": args.stand_only})
+                           env_kwargs={"stand_only": args.stand_only,
+                                       "ground_shaping": args.ground_shaping,
+                                       "getup_reward": args.getup_reward})
 
     if args.init_from:
         custom_objects = {"ent_coef": args.ent_coef} if args.ent_coef is not None else None
@@ -365,15 +516,21 @@ def main():
                       KneeScaffoldCallback(args.timesteps, already_relaxed=args.knee_already_relaxed),
                       VelocityAssistCallback(args.timesteps, already_relaxed=args.assist_already_relaxed)]
     if args.stand_only:
+        curriculum_kwargs = {} if args.calm_end_frac is None else {"end_frac": args.calm_end_frac}
         callback_list.append(
             CurriculumGateCallback(args.timesteps, already_relaxed=args.calm_already_relaxed,
                                     fall_rate_gate=args.curriculum_fall_gate,
-                                    streak_gate_steps=args.curriculum_streak_gate))
+                                    streak_gate_steps=args.curriculum_streak_gate,
+                                    **curriculum_kwargs))
         callback_list.append(
             HeightRewardScaffoldCallback(args.timesteps, start_scale=args.height_start_scale,
                                           end_scale=args.height_end_scale,
                                           relax_frac=args.height_relax_frac,
                                           already_relaxed=args.height_already_relaxed))
+    if args.stand_only and args.replay_curriculum:
+        callback_list.append(ReplayCurriculumCallback(frac=args.replay_frac))
+    if args.stand_only and args.gear_curriculum:
+        callback_list.append(GearCurriculumCallback(start_max=args.gear_start))
     callbacks = CallbackList(callback_list)
 
     try:
