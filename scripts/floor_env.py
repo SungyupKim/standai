@@ -13,8 +13,11 @@ Hand-off pose = torso >= HOLD_TORSO_Z, head >= HANDOFF_HEAD_Z, a foot down, |pit
 (v1/v2 ended the episode the first instant head >= 0.9 m with a foot down; watching successes showed every one
 of them dropping back to torso 0.3-0.5 m within 3 s, i.e. a pop-up, not a stand.)
 """
+import os
+
 import numpy as np
 
+import env as _base_env
 from locomotion_env import LocomotionEnv
 
 FLOOR_START_Z = 0.5            # resample the start until the torso is this low (lying / collapsed)
@@ -23,6 +26,45 @@ HANDOFF_HEAD_Z = 0.9           # head height (m) at which the stand policy takes
 HANDOFF_MAX_PITCH_DEG = 60.0
 HOLD_TORSO_Z = 0.6
 HOLD_STEPS = 1                 # reach = success (v3 used 20 steps; holding the pose is the STAND policy's job)
+# "settled" hand-off (OPT-IN: FloorEnv(settled=True) / train_floor.py --settled; the default stays the v1-v4 condition):
+# the loose condition fires while the body is still being thrown up (torso vz ~ +1.5 m/s, pitch rate ~ 100 deg/s) and
+# the stand policy v37@96M catches only ~10% of those states; with |vz| < 0.5 and |pitch rate| < 100 deg/s (a single step)
+# it caught 24% -- but v4 reaches that state in only 46/200 starts, and NOT for 3 consecutive steps (2/100): those are
+# mostly passes through the apex of the throw, not a settled pose. Untested as a training target (v5 was not run).
+SETTLED_TORSO_Z = 0.7
+SETTLED_MAX_PITCH_DEG = 40.0
+SETTLED_MAX_VZ = 0.5           # m/s
+SETTLED_MAX_PITCH_RATE = 100.0  # deg/s
+SETTLED_HOLD_STEPS = 1         # 3 would leave v4 with 2/100 starts that ever qualify; 1 matches the 46/200 measurement
+SETTLE_SCALE = 0.03            # per-step shaping near the top: slower is better (bounded, success pays more)
+# "stand-ready" hand-off (OPT-IN: FloorEnv(standready=True) / train_floor.py --standready, floor v6): the floor policy
+# keeps going until the body is in the region where the STAND policy is known to hold (upright calm starts: 92%; with
+# extra torso vz up to +-1 m/s and pitch rate up to +-100 deg/s it still holds 53-100%, scripts/analysis/stand_velocity_map.py),
+# instead of handing over a deep squat (knee ~ -92 deg) that is still rising (stand policy catches ~7%). Starts: lying
+# (as before) plus `crouch_frac` crouched calm starts, so the same policy also covers "get up from a crouch".
+SR_TORSO_Z = 1.08
+SR_MAX_KNEE_BEND_DEG = 20.0     # both knees straighter than -20 deg
+SR_MAX_PITCH_DEG = 20.0
+SR_MAX_VZ = 1.0                # m/s
+SR_MAX_PITCH_RATE = 100.0      # deg/s
+# Staged stand-ready target (FloorEnv(level=...) / train_floor.py --level-start): level 1 = the strict thresholds above, level 0 = the
+# LOOSE ones below, linear in between; set_level() lets a callback tighten it while training. Foot-down is required at every level.
+# Why: prone floor policies (prone1-3, 40M steps) reached torso ~0.93 m (median) but the strict region (1.08 m, knees > -20, pitch < 20,
+# slow) was met 0-1 times in 100, so there was no success bonus to learn from.
+SR_LOOSE = dict(torso=0.75, knee_bend=110.0, pitch=45.0, vz=2.5, pr=400.0, com=0.30)   # torso was 0.85 in prone4/5/6 (warm starts); 0.75 for a from-scratch run
+SR_BONUS = 20.0
+SR_DENSE_SCALE = 0.05          # per-step: torso height x knee extension
+SR_SETTLE_SCALE = 0.03
+SR_MAX_STEPS = 300             # 6 s (lying -> 0.9 m head takes ~1.8 s median; the knee extension comes after)
+CROUCH_KNEE_DEG = -25.0        # a calm start counts as "crouched" if a knee is bent more than this ...
+CROUCH_TORSO_Z = 1.05          # ... or the torso is lower than this
+# v10 opt-in penalties (FloorEnv(speed_pen=..., air_pen=...) / train_floor.py --speed-pen --air-pen), standready only:
+#   speed_pen: height x speed. weight h_w = 0 at torso 0.6 m rising to 1 at 1.08 m, speed = |vz|/1.0 + |pitch rate|/100 deg/s
+#              (the two tolerances of the stand-ready region). Fast motion is cheap near the floor (rising needs it) and
+#              expensive up high, where the stand policy loses balance (pitch rate >~ 100-200 deg/s => 0-43% hold).
+#   air_pen:   per step with torso > 0.6 m and NO foot on the floor (hopping / leaping up instead of standing up).
+SP_H_LO = 0.6
+SP_H_HI = 1.08
 RECORD_K = 10.0
 DENSE_SCALE = 0.02
 TORSO_DENSE_SCALE = 0.03
@@ -31,8 +73,37 @@ _MAX_RESAMPLE = 30
 
 
 class FloorEnv(LocomotionEnv):
-    def __init__(self, **kwargs):
+    def __init__(self, settled=False, standready=False, crouch_frac=0.4, speed_pen=0.0, air_pen=0.0, speed_vz_w=1.0, max_steps=None, prone_frac=0.0, down_timeout=None, level=1.0, com_max=None, **kwargs):
         super().__init__(stand_only=True, **kwargs)
+        self._level = float(level)
+        # optional stand-ready condition: centre of mass x minus the FRONT foot x <= com_max (m). Hand-off states the stand policy
+        # does not hold have the COM ~10 cm ahead of the front foot, held ones ~2 cm (AUC 0.26, 163 prone hand-offs of v4 @41M).
+        self._com_max = com_max
+        self._root_body = int(self.model.body_rootid[self.a_torso_id])
+        # env.py ends an episode as a KO once the torso has stayed below FALL_HEIGHT for DOWN_RECOVERY_STEPS (250 = 5 s)
+        # in a row; a floor policy that is still on the floor at 5 s therefore never sees the 450-step limit. down_timeout=False
+        # (or STANDAI_FLOOR_NO_DOWN_TIMEOUT=1) disables that rule for this process so only max_steps ends a floor episode.
+        # Process-wide (it patches env.DOWN_RECOVERY_STEPS), which is fine: floor processes only run FloorEnv.
+        if down_timeout is None:
+            down_timeout = os.environ.get("STANDAI_FLOOR_NO_DOWN_TIMEOUT") != "1"
+        if not down_timeout:
+            _base_env.DOWN_RECOVERY_STEPS = 10 ** 9
+        # share of lying starts forced to the start-pitch <= 0 side (head toward +x; inferred face-down/prone, not verified).
+        # The natural split is ~80/20 and v12 @101.5M reaches 51% of the + side but 1/41 of the - side (200 seeds), so training
+        # oversamples it. 0 = natural distribution (the evaluations keep 0, so fixed-seed numbers stay comparable).
+        self._prone_frac = prone_frac
+        self._start_side = "pos"
+        # episode length: None = SR_MAX_STEPS (standready) / FLOOR_MAX_STEPS. v11 @98.8M, lying starts, 100 seeds: 300 steps
+        # reached 31 / held 16, 450 steps 39 / 20, 750 steps 42 / 22 (the median reach is at step 202, the top quartile >310)
+        self._max_steps = max_steps if max_steps is not None else (SR_MAX_STEPS if standready else FLOOR_MAX_STEPS)
+        self._settled = settled
+        self._standready = standready
+        self._crouch_frac = crouch_frac
+        self._speed_pen = speed_pen
+        self._air_pen = air_pen
+        self._speed_vz_w = speed_vz_w     # weight of |vz| inside the speed term (the binding quantity is the pitch rate, not vz)
+        self._start_kind = "lying"
+        self._ry_dof = self.model.joint("a_root_ry").dofadr[0]
         self._calm_frac = 0.0
         self._floor_head_best = 0.0
         self._floor_head_max = 0.0
@@ -41,12 +112,51 @@ class FloorEnv(LocomotionEnv):
     def set_calm_frac(self, frac):          # the callbacks may broadcast this; a floor env is never calm
         self._calm_frac = 0.0
 
+    def _knee_min_deg(self):
+        return float(np.degrees(min(self.data.qpos[self._knee_r_qpos], self.data.qpos[self._knee_l_qpos])))
+
+    def set_level(self, level):             # called through env_method by the curriculum callback
+        self._level = float(min(1.0, max(0.0, level)))
+
+    def _sr_thresholds(self):
+        """(torso_z, knee_bend_deg, pitch_deg, vz, pitch_rate_deg) of the stand-ready region at the current level."""
+        a = self._level
+        lo = SR_LOOSE
+        mix = lambda loose, strict: loose + a * (strict - loose)
+        return (mix(lo["torso"], SR_TORSO_Z), mix(lo["knee_bend"], SR_MAX_KNEE_BEND_DEG), mix(lo["pitch"], SR_MAX_PITCH_DEG),
+                mix(lo["vz"], SR_MAX_VZ), mix(lo["pr"], SR_MAX_PITCH_RATE))
+
+    def _com_limit(self):
+        """COM-ahead limit at the current level: SR_LOOSE['com'] at level 0 -> com_max at level 1 (None = condition off)."""
+        if self._com_max is None:
+            return None
+        return SR_LOOSE["com"] + self._level * (self._com_max - SR_LOOSE["com"])
+
+    def _com_ahead(self):
+        """COM x minus the front foot x (m); positive = the centre of mass is ahead of the support (assumes the body faces +x)."""
+        return float(self.data.subtree_com[self._root_body][0] - max(self.data.site_xpos[s][0] for s in self.a_feet))
+
+    def _start_pitch(self):
+        return float((self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi)
+
     def reset(self, seed=None, options=None):
-        obs, info = super().reset(seed=seed, options=options)
-        for _ in range(_MAX_RESAMPLE):
-            if self.data.xpos[self.a_torso_id][2] < FLOOR_START_Z:
-                break
-            obs, info = super().reset(options=options)
+        obs, info = super().reset(seed=seed, options=options)      # calm_frac is 0: a harsh (collapsed) start
+        self._start_kind = "lying"
+        if self._standready and self.np_random.random() < self._crouch_frac:
+            self._calm_frac = 1.0                                   # crouched calm start, resampled until clearly crouched
+            for _ in range(_MAX_RESAMPLE):
+                obs, info = super().reset(options=options)
+                if self._knee_min_deg() < CROUCH_KNEE_DEG or self.data.xpos[self.a_torso_id][2] < CROUCH_TORSO_Z:
+                    break
+            self._calm_frac = 0.0
+            self._start_kind = "crouch"
+        else:
+            want_neg = self._prone_frac > 0.0 and self.np_random.random() < self._prone_frac
+            for _ in range(_MAX_RESAMPLE):
+                if self.data.xpos[self.a_torso_id][2] < FLOOR_START_Z and (not want_neg or self._start_pitch() <= 0.0):
+                    break
+                obs, info = super().reset(options=options)
+        self._start_side = "neg" if self._start_pitch() <= 0.0 else "pos"
         head = float(self.data.xpos[self.a_head_id][2])
         self._floor_head_best = min(head, HANDOFF_HEAD_Z) / HANDOFF_HEAD_Z
         self._floor_head_max = head
@@ -67,20 +177,59 @@ class FloorEnv(LocomotionEnv):
         torso = float(self.data.xpos[self.a_torso_id][2])
         dense = (DENSE_SCALE * phi + TORSO_DENSE_SCALE * phi * min(torso / 0.7, 1.0)) * foot_down
         pitch = (self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi
-        in_pose = bool(foot_down and head >= HANDOFF_HEAD_Z and torso >= HOLD_TORSO_Z
-                       and abs(pitch) < np.deg2rad(HANDOFF_MAX_PITCH_DEG))
+        settle = 0.0
+        sr_dense = 0.0
+        speed_pen = 0.0
+        air_pen = 0.0
+        if self._standready:
+            vz = float(self.data.qvel[self.a_z_dof])
+            pr = float(np.degrees(self.data.qvel[self._ry_dof]))
+            knee = self._knee_min_deg()
+            t_z, t_knee, t_pitch, t_vz, t_pr = self._sr_thresholds()
+            in_pose = bool(foot_down and torso >= t_z and knee >= -t_knee
+                           and abs(pitch) < np.deg2rad(t_pitch) and abs(vz) < t_vz and abs(pr) < t_pr
+                           and (self._com_max is None or self._com_ahead() <= self._com_limit()))
+            ext = min(1.0, max(0.0, 1.0 + knee / 60.0))              # 1 at straight knees, 0 at -60 deg or more bent
+            sr_dense = SR_DENSE_SCALE * min(1.0, max(0.0, (torso - 0.6) / 0.5)) * ext * foot_down
+            if self._speed_pen > 0.0:
+                h_w = min(1.0, max(0.0, (torso - SP_H_LO) / (SP_H_HI - SP_H_LO)))
+                speed_pen = self._speed_pen * h_w * (self._speed_vz_w * abs(vz) / SR_MAX_VZ + abs(pr) / SR_MAX_PITCH_RATE)
+            if self._air_pen > 0.0 and torso > SP_H_LO and not foot_down:
+                air_pen = self._air_pen
+            if foot_down and torso >= 0.9:
+                settle = SR_SETTLE_SCALE * float(np.exp(-(vz / SR_MAX_VZ) ** 2 - (pr / SR_MAX_PITCH_RATE) ** 2))
+        elif self._settled:
+            vz = float(self.data.qvel[self.a_z_dof])
+            pr = float(np.degrees(self.data.qvel[self._ry_dof]))
+            in_pose = bool(foot_down and head >= HANDOFF_HEAD_Z and torso >= SETTLED_TORSO_Z
+                           and abs(pitch) < np.deg2rad(SETTLED_MAX_PITCH_DEG)
+                           and abs(vz) < SETTLED_MAX_VZ and abs(pr) < SETTLED_MAX_PITCH_RATE)
+            if foot_down and head >= 0.8 * HANDOFF_HEAD_Z and torso >= HOLD_TORSO_Z:
+                settle = SETTLE_SCALE * float(np.exp(-(vz / SETTLED_MAX_VZ) ** 2 - (pr / SETTLED_MAX_PITCH_RATE) ** 2))
+        else:
+            in_pose = bool(foot_down and head >= HANDOFF_HEAD_Z and torso >= HOLD_TORSO_Z
+                           and abs(pitch) < np.deg2rad(HANDOFF_MAX_PITCH_DEG))
         self._hold = self._hold + 1 if in_pose else 0
-        success = self._hold >= HOLD_STEPS
-        bonus = SUCCESS_BONUS if success else 0.0
-        reward = record + dense + bonus
+        success = self._hold >= (SETTLED_HOLD_STEPS if self._settled and not self._standready else HOLD_STEPS)
+        bonus = (SR_BONUS if self._standready else SUCCESS_BONUS) if success else 0.0
+        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen
 
         info["reward_breakdown"] = {"head_record": record, "ground_height": dense}
+        if self._settled or self._standready:
+            info["reward_breakdown"]["settle"] = settle
+        if self._standready:
+            info["reward_breakdown"]["standready_dense"] = sr_dense
+            info["reward_breakdown"]["speed_pen"] = -speed_pen
+            info["reward_breakdown"]["air_pen"] = -air_pen
         if success:
             terminated = True
             info["handoff_state"] = (self.data.qpos.copy(), self.data.qvel.copy(), head)
-        if self.step_count >= FLOOR_MAX_STEPS:
+        if self.step_count >= self._max_steps:
             truncated = True
         if terminated or truncated:
             info["floor_success"] = success
+            info["start_kind"] = self._start_kind
+            info["start_side"] = self._start_side
+            info["floor_level"] = self._level
             info["floor_head_max"] = self._floor_head_max
         return obs, reward, terminated, truncated, info
