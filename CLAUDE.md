@@ -11,7 +11,14 @@ Check before assuming anything is idle or stale:
 ```bash
 pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py|train_floor.py|floor_progress_notify.py|watch_floor.py"
 ```
-Current stand lineage: `ppo_stand_v38_handoff` (log `checkpoints/locomotion_train_stand_v38.log`, notifier `stand_progress_notify.py --handoff-eval`); `v37` was stopped at 120M after it regressed (see v38 below). Floor policy `ppo_floor_v4` finished.
+**State of play (2026-10-15):** three policies (details: `README.md` status table, `docs/experiments_2026-10-11.md` 3.17, `docs/TECHNICAL_SUMMARY.md` 6).
+- Supine floor policy `ppo_floor_v12` (best used: `autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip`): reaches the stand-ready region from 55% of its starts.
+- Prone floor policy `ppo_floor_prone8` (`checkpoints/best_prone8.zip` = 86.5M; 77.45M / 82M / 84.25M / 97.8M are statistically the same, ~58% reach, ~22% held): training stopped at ~100M, plateau since ~77M.
+- Stand policy: `v37`@96M is the one used for hand-over measurements. `v38` (hand-off pool 40%) FINISHED at 136M with no gain: it catches 8/150 of the loose hand-off set vs 11/150 for `v37`@96M, calm gate (30 seeds) 0.37-0.53. A from-scratch retrain on a broader mix is next (pool files `checkpoints/pool_*.npz` from `scripts/make_strict_pool.py`).
+- Best end-to-end system today: floor policy by start-pitch sign -> `v37` (~26% end up standing; a loop back to the floor policy on a fall gives nothing, floor policies alone 4%). The selector/switch is not built.
+- Floor runs use `--no-down-timeout` (env.py's 5 s "stayed down" KO off), `--max-steps 450`, `--standready`; `--prone-frac 1.0` = prone starts only; the staged target is `--level-start 0.0` (works only from a network that already gets high).
+- Pick floor checkpoints by re-measuring candidates on the SAME 400 seeds (`scripts/analysis/eval_ckpt.py`); 200-seed "bests" were noise. State the "held" criterion every time (never below 0.7 m for 3 s vs torso >= 0.7 m at 3 s differ hugely for the floor policies).
+Check for running processes first (above). As of this edit only the strict-pool builders (`make_strict_pool.py`) may be running.
 **Body spec changed (2026-10-11): limb actuator gears are x1.5 by default** (`BODY_GEAR_SCALE` in
 `locomotion_env.py`, hip 270 / knee 90 / ankle 60; root_x/root_ry untouched). Reason: a closed-loop MPC
 oracle stands from only 2/6 lying starts at x1 but 5/6 at x1.5 (same as x2), and an unchanged policy
@@ -98,7 +105,7 @@ restart point was chosen by calm gate: the last point before the decline, 96M). 
 The pool is FIXED (not refreshed) -- if hand-off catch rises on the pool's states but not on the eval set, it is memorising; next step then is a
 failure-weighted refresh. Baseline at launch: hand-off upright 11/150, calm gate 51/100. Judge v38 by the notifier's "hand-off catch" line and the
 calm gate, not the training log.
-Resume v38: `cd scripts; ../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 40000000 --stand-only --out ppo_stand_v38_handoff
+(v38 FINISHED 2026-10-12 at 136M with no gain; the command below is kept only to reproduce it.) Resume v38: `cd scripts; ../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 40000000 --stand-only --out ppo_stand_v38_handoff
 --height-start-scale 6.0 --height-end-scale 15.0 --height-relax-frac 0.3 --height-already-relaxed --curriculum-fall-gate 0.65
 --curriculum-streak-gate 350 --calm-already-relaxed --calm-end-frac 0.8 --handoff-pool ../checkpoints/handoff_pool_v4.npz --handoff-frac 0.4
 --ent-coef 0.0 --init-from "$(ls -t ../checkpoints/autosave/ppo_stand_v38_handoff_*_steps.zip | head -1)" >> ../checkpoints/locomotion_train_stand_v38.log 2>&1 &`

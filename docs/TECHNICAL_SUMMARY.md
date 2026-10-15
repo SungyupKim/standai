@@ -246,3 +246,62 @@ from 0.2-0.4 to 0.03; hand-off catch 9/150 vs 11/150 at the start, calm gate 49 
 calm is not being lost. The pool is static; a failure-weighted refresh is the planned next step if the
 train/eval gap opens.
 
+
+## 6. Update 2026-10-13..15: stand-ready target, a separate prone policy, staged targets
+
+All numbers: deterministic policies, fixed seeds, "held" = the stand policy `v37`@96M takes over at the moment of
+hand-off and the torso never drops below 0.7 m for 3 s (150 steps). Seeds 0..199/399 for evaluation, 1000+ for anything trained on.
+
+**1. Hand-off target moved to the region the stand policy can hold.** Reaching "head >= 0.9 m" (v1-v4) handed over deep,
+still-rising squats the stand policy caught 5-9% of the time. The floor policy now has to reach the *stand-ready region*:
+foot down, torso >= 1.08 m, both knees straighter than -20 deg, |pitch| < 20 deg, |vz| < 1 m/s, |pitch rate| < 100 deg/s
+(`FloorEnv(standready=True)`; the region comes from `analysis/stand_velocity_map.py`). Lying-start reach of that region went
+2% -> 32% and plateaued; each condition alone is usually met, all six at once rarely, and in 74% of failures no foot is on the
+floor at the highest point (the policy throws the body up).
+
+**2. Things that did not work** (all single runs): a height x speed penalty (the "braking habit", share of steps above
+1.0 m with |pitch rate| < 100 deg/s, stayed 53% -> 54%); making the episode longer helped only slightly (+6 reached /
++3..4 held per 100 seeds from 300 to 450 steps); a waist-angle condition (AUC 0.44, wrong direction); a centre-of-mass condition
+trained into the policy (see 4). **Discovered mid-way:** `env.py` ends an episode as a KO after the torso stays below
+`FALL_HEIGHT` for 250 steps, so a policy still on the floor at 5 s never saw the longer limit; `FloorEnv(down_timeout=False)` switches
+it off and all later floor numbers are measured without it.
+
+**3. One start side was never solved - and it is solvable.** The sign of the initial torso pitch splits starts 80/20 (159 vs 41
+of 200). `v12` reached the region from 87/159 on the larger side and 1/41 on the other (inferred face-down / prone; this assumes the
+body faces +x and was not verified directly; positive waist angle moves the head toward -x, checked). A closed-loop MPC
+oracle stands from 5/6 prone starts (88-100% of the time standing, first upright after 0.4-0.6 s), so it is a learning
+problem, not the body. A fresh prone-only network (`--prone-frac 1.0`) was run several ways:
+- from scratch with the strict target: head rises (torso median 0.93 m at 7.5M) but the region is reached 0-1 times in 100
+  for 26M steps, and it regresses afterwards;
+- **staged target (`FloorEnv(level=...)`, level 0 loose -> 1 strict, tightened by `LevelCurriculumCallback` whenever the training
+  success rate clears 0.35), warm-started from that 7.5M network (`prone4`)**: level 1.0 after ~16M steps, then 40% reach;
+  continued at a lower learning rate (`prone8`, 42.5M -> ~100M) it reached **~58% of prone starts, ~22% held** (400 seeds, five
+  candidate checkpoints between 77M and 98M are indistinguishable; plateau since ~77M);
+- the same staged target from scratch (`prone7`, 34M steps): level never left 0 (training success 5.5% < gate), 0/200 at the strict
+  target in every one of 12 evaluations. The staging works only on top of a network that already knows how to get high.
+
+**4. What decides whether the stand policy holds a hand-off state.** For 163 prone hand-offs: the six region variables do not
+separate held from not held; the centre of mass relative to the front foot does (AUC 0.26: +2 cm ahead of the front foot when held,
++10 cm when not). Adding "COM within 6 cm of the front foot" to the region lifts the held share of reached states from 38% to
+56% on a policy not trained for it, but trained into the policy (8M steps) it did not raise the number held. The waist sits
+at its +45 deg limit at the highest point in almost all episodes and is not informative.
+
+**5. Controller structure, measured end to end** (natural start mix 80/20, 20 s, "standing" = torso >= 0.95 m and |pitch| < 30 deg
+for the last 25 steps): floor policy -> stand policy, no way back **26%**; with a loop back to the floor policy when the torso
+falls 24%; the floor policies alone **4%**. The floor policies often fall after reaching the region and get up again
+(55% have the torso above 0.7 m at 3 s, only 1% never dropped below), the stand policy does not recover once it falls, and
+looping back adds nothing. Current best system = **floor policy (supine `v12`, prone `prone8`) -> `v37`@96M, about 26%
+end to end**; the stand policy catches 51% (supine side) / 36% (prone side) of what it is handed, versus 77-92% from upright starts.
+
+**Lessons (also in the Korean doc, section 7):** pick checkpoints by re-measuring a few top candidates on the same larger seed set
+(a 200-seed "best" was noise); always state which "held" criterion is meant; hypotheses about causes (penalty, local optimum)
+must be marked as such until measured.
+
+`v38` (stand policy continued from `v37`@96M with 40% loose hand-off starts) finished at 136M with no gain: it catches 8/150 of the loose
+hand-off evaluation set vs 11/150 for `v37`@96M.
+
+**Next / open.** Retrain the stand policy **from scratch** on a broader start mix (upright, crouched, and ~8,000 strict-region
+hand-off states pooled from `v12` and `prone8`, `scripts/make_strict_pool.py`; the precedent `v21` went 5/100 -> 15/100 ->
+30-40% calm gate in 8.7M -> 17.7M -> ~55M steps). `v37`@96M stays as fallback. Still open: the crouched-start gap (no policy
+owns it; the stand policy holds 5-44% of crouched calm starts), the switch / selector between the three models
+(supine floor, prone floor, stand - not built; start side is observable from the initial pitch sign), and multi-seed repetition.
