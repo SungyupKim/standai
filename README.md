@@ -8,29 +8,28 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-## Current status (2026-10-15)
+## Current status (2026-10-17)
 
-The problem is split into **three policies**, because the single stand policy never learned to get off the floor
-(0/160 genuine uprights from starts below 0.6 m torso height, for every checkpoint). The sign of the initial torso pitch
-(observable) picks the floor policy; both hand over to the stand policy once the body is in the *stand-ready region*
-(foot down, torso >= 1.08 m, knees > -20 deg, |pitch| < 20 deg, |vz| < 1 m/s, |pitch rate| < 100 deg/s).
+The problem is split into **three policies** (the single stand policy never learned to get off the floor: 0/160 genuine uprights from starts below 0.6 m). The sign of the initial torso pitch (observable) picks the floor
+policy; both hand over to the stand policy once the body is in the *stand-ready region* (foot down, torso >= 1.08 m, knees > -20 deg, |pitch| < 20 deg, |vz| < 1 m/s, |pitch rate| < 100 deg/s).
+A rule-based controller that does exactly this (`scripts/controller.py`) is the best end-to-end system so far.
 
 | Policy | Job | State (deterministic, fixed seeds) |
 |---|---|---|
-| **Supine floor policy** (`train_floor.py`, `FloorEnv`, lineage `v1 -> v4 -> ... -> v12`) | lying on the back (~80% of lying starts) -> stand-ready region | reaches the region from **55%** of its starts; the stand policy then holds 51% of those for 3 s (**~28%** of starts) |
-| **Prone floor policy** (`--prone-frac 1.0`, lineage `prone3 -> prone4 -> prone8`) | lying face-down (~20%; inferred from the pitch sign, unverified) -> region | 0% with a plain restart; **~58%** reach with a staged target (loose -> strict, `--level-start 0.0`); stand policy holds 36% of those (**~22%** of starts); plateau since ~77M steps |
-| **Stand policy** (`train_locomotion.py`, `v37`@96M) | hold the stand from what the floor policies hand over, balance, recover from partial falls | holds 77-92% of upright starts but only 36-51% of hand-offs and 5-44% of crouched starts. A from-scratch retrain on a broader start mix (upright + crouched + pooled hand-off states) is being prepared |
+| **Supine floor policy** (`train_floor.py`, `FloorEnv`, `v12`) | lying on the back (~80% of lying starts) -> stand-ready region | reaches the region from 44-55% of its starts; the stand policy holds 51% of those for 3 s (~22-28% of starts) |
+| **Prone floor policy** (`--prone-frac 1.0`, `prone3 -> prone4 -> prone8`) | lying face down (~20%; inferred from the pitch sign, unverified) -> region | 0% with a plain restart; ~58-63% reach with a staged target (loose -> strict, `--level-start 0.0`) from a pre-trained network; stand policy holds 36% of those (~22% of starts); plateau since ~77M steps |
+| **Stand policy** (`train_locomotion.py`, `v37`@96M) | hold the stand from what the floor policies hand over | holds 77-92% of upright starts, **42% of hand-off states (127/300)**, 5-44% of crouched starts. Six from-scratch runs (13-55M steps) and four fine-tuning variants on a hand-off pool did not move the 42% |
 
-**End to end, floor policy -> stand policy (natural start mix, 20 s): ~26% end up standing.** Loop back to the floor
-policy when the stand policy falls: 24% (no gain). Floor policies alone: 4%. The switch / selector between the
-three models is **not built**; the numbers above come from hard-coded hand-offs in `scripts/analysis/system_loop.py`
-and `hold_compare.py`. Before the split the same measurement was 0/160.
+**End to end (rule-based controller, natural start mix, 20 s): 24% of starts end standing** (18% without falling back to the floor policy when the stand policy falls; floor policies alone 4%).
 
-Open problems, in order of importance: (1) the stand policy catches too few hand-off states (the centre of mass being
-~10 cm ahead of the front foot is what separates the ones it loses; training the floor policy to avoid it did not help,
-so the stand policy has to learn them); (2) the crouched-start gap (nobody owns it); (3) the switch / selector;
-(4) every result is a single training run; (5) PPO on the floor policies runs with `approx_kl` 0.1-0.7 and checkpoints
-after the peak regress, so checkpoints are picked by re-measuring a few candidates on 400 seeds.
+What was tried on the stand policy's 42% and did not move it: fine-tuning `v37` on a pool of 8,000 hand-off states (40% of starts, failure-weighted replay, exploration kept: it memorises the pool, held-out catch 127 -> 127);
+a loose pool (`v38`, 8/150 vs 11/150); six from-scratch runs (x1.5 body, with/without pool, performance-gated pool, v21-era reward, torque-normalised std; all stay flat on the floor, gate 0);
+hand-over timing and looser hand-over regions (reach rises 63 -> 79% but the number held stays ~22% of starts); a centre-of-mass condition in the floor policy. A faithful x1-body replica of the
+v21 recipe (`v46`) is running without a verdict yet. The states the stand policy loses have the centre of mass ~10 cm ahead of the front foot (they need a step).
+
+A measurement trap found on the way: the trainer's `fall_rate` is optimistic because training clamps the knee angle in calm episodes (a rigid support); judge with the fixed-seed gate and continuous indicators (torso height after 3 s, share of time above 0.7 m).
+
+Open problems, in order of importance: (1) the stand policy's catch of hand-off states (42%); (2) the crouched-start gap (nobody owns it); (3) a learned hand-over selector (only if labelled snapshots give a classifier AUC >= 0.8); (4) every result is a single training run.
 
 What the investigation found (details, numbers and failures: [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md)):
 
@@ -92,6 +91,7 @@ scripts/floor_progress_notify.py  KakaoTalk pings: policy-alone eval, split by s
 scripts/watch_floor.py        Viewer for the floor policy (--stand <ckpt> hands over, --only-success --skip-replay shows only the catch,
                               --lying-only --prone-frac 1.0 prone starts only)
 scripts/make_handoff_pool.py / make_strict_pool.py  collect hand-off states for training the stand policy (loose / strict region)
+scripts/controller.py         GetUpController: rule-based combination of the supine / prone floor policies and the stand policy (scripts/analysis/controller_eval.py)
 scripts/stand_progress_notify.py  Periodic KakaoTalk progress pings with a real fixed-seed gate
 scripts/kakao_notify.py       Shared KakaoTalk notify helper (copied from fightai)
 checkpoints/                  Trained models, autosaves, logs (gitignored)

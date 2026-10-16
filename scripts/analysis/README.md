@@ -42,6 +42,14 @@ stand policy `ppo_stand_v37_ladder_..._96000000_steps.zip`; edit the constants a
 | `system_loop.py <A\|B\|C> <n> [steps]` | whole-system structures over 20 s: A floor<->stand loop, B floor only, C floor->stand without a way back |
 | `mpc_prone.py <seeds…>` | MPC on prone-side starts (5/6 stand), wrapper that does not overwrite the saved .npz |
 | `best_ckpt_guard.py` | keeps a copy of the best-evaluated checkpoint while a run trains (never touches training) |
+| `stand_posture_diag.py <ckpt>` | stand policy: torso height / pitch / head after 3 s on calm starts and on the strict hand-off set (v39: flat on the floor) |
+| `stand_longrun_diag.py <ckpt> [n]` | 20 s from calm starts: first drop below 0.7 m, longest run below it, share above it, 250-step KO count |
+| `stand_fallrate_replica.py <ckpt> [n]` | recomputes the trainer's fall_rate / ep_len outside the trainer, calm vs harsh |
+| `stand_vecenv_replica.py <ckpt> <plain\|knee\|all>` | the checkpoint in a trainer-built SubprocVecEnv with the knee floor / scaffolds (showed the knee floor is a support: KO 16/16 -> 10/16) |
+| `gate_calm_n.py <ckpt> [n]` | calm gate under the current code; `STANDAI_BODY_GEAR=` changes the gear, `STANDAI_GATE_KNEE_FLOOR=-78` applies the training knee floor |
+| `handoff_timing_oracle.py <floor ckpt> <n> <prone_frac>` | hold rate by hand-over offset around the region entry (and the multiple-testing oracle) |
+| `handoff_level_sweep.py <floor ckpt> <n> <prone_frac> <levels>` | hand over at a looser region level; reach and held per level |
+| `controller_eval.py <level> <fall_back> <n> [steps]` | end-to-end standing of the rule-based `scripts/controller.py` |
 
 `getup_cem.py` / `getup_mpc.py` replicate `env.step`'s stand-only physics in a light rollout
 (verified identical to `env.step`, max |dz| = 0.0000). The MPC is a *diagnostic*, not a teacher: it

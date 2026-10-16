@@ -745,7 +745,9 @@ class LocomotionEnv(Fighter2DEnv):
         # over "tuck and push". Hard-floored instead: zero below half of FALL_HEIGHT, linear
         # ramp to full strength only in the top half -- a truly flat posture now gets exactly 0
         # from these two terms, leaving recovery/height as the only signal while on the ground.
-        recovery_gate = min(1.0, max(0.0, (self.data.xpos[self.a_torso_id][2] / FALL_HEIGHT - 0.5) / 0.5))
+        # STANDAI_NO_RECOVERY_GATE=1 switches the gate off (= the v21-era reward: v21 was trained before any recovery gate existed)
+        recovery_gate = (1.0 if _os.environ.get('STANDAI_NO_RECOVERY_GATE') == '1'
+                         else min(1.0, max(0.0, (self.data.xpos[self.a_torso_id][2] / FALL_HEIGHT - 0.5) / 0.5)))
         knee_min = min(self.data.qpos[self._knee_r_qpos], self.data.qpos[self._knee_l_qpos])
         knee_straight_min = min(1.0, max(0.0, (knee_min + np.deg2rad(140.0)) / np.deg2rad(140.0)))
         knee_straight_reward = (KNEE_STRAIGHT_SCALE * knee_straight_min * recovery_gate

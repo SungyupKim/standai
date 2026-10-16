@@ -305,3 +305,29 @@ hand-off states pooled from `v12` and `prone8`, `scripts/make_strict_pool.py`; t
 30-40% calm gate in 8.7M -> 17.7M -> ~55M steps). `v37`@96M stays as fallback. Still open: the crouched-start gap (no policy
 owns it; the stand policy holds 5-44% of crouched calm starts), the switch / selector between the three models
 (supine floor, prone floor, stand - not built; start side is observable from the initial pitch sign), and multi-seed repetition.
+
+## 7. Update 2026-10-15..17: retraining the stand policy, hand-over timing, a rule-based controller
+
+Evaluation tools: a 8,000-state pool of strict-region hand-off states (prone `prone8` x2 checkpoints + supine `v12` x2 checkpoints, seeds 1000+/20000+) for training and a disjoint
+300-state set (seeds 0+, deterministic) for evaluation. The baseline stand policy `v37`@96M keeps 127/300 (42%) of the evaluation states genuinely upright (torso >= 0.7 m, head >= 0.9 m,
+pitch < 40 deg held 20 steps).
+
+**1. Stand policy from scratch: nothing learned (six runs, 13-55M steps).** With the x1.5 body, with/without a 40% pool from step 0, with a performance-gated pool (it never opened: 111 gates read 0.000),
+with the v21-era reward (`STANDAI_NO_RECOVERY_GATE=1`), with a torque-normalised std cap (0.4): fixed-seed upright-start gate 0 throughout; the policy ends up flat on the floor (torso 0.40 m after 3 s). The training log looked
+healthy (fall_rate 0.4-0.5, episode length 650-900) because the training-time **knee-angle floor** (calm episodes clamp the knee at -50..-80 deg) acts as an invisible support: re-run in a trainer-like vector env, the KO rate is 16/16
+with no scaffold, 10/16 with the knee floor (matching the log). Checks that rule out a broken environment: `v21`@82.4M gives 33 / 40 / 39 of 100 at gear x1 / x1.25 / x1.5 in the current code (recorded: 33 at x1), so the
+learned skill survives the stronger body; the failure is of learning from scratch at x1.5, not of forgetting. A faithful v21 replica (x1 body + v21-era reward, `v46`) is paused at 4M steps without a verdict.
+
+**2. Continuing `v37` on the hand-off pool does not raise the catch.** `v38` (loose pool, 40%, 136M): 8/150 vs 11/150. `v47` (`v37`@96M + strict pool 40% + failure-weighted replay + std floor 0.45 + entropy bonus):
+127/300 after 10M steps (baseline 127), while the pass rate on pool states rose 26 -> 36% - the policy memorises pool states and does not generalise to the held-out set. Upright-start gate stays ~0.5.
+
+**3. Hand-over timing and the trigger do not help either.** Testing "would the stand policy hold 3 s if it took over here?" at 17 moments around the entry gives an oracle of 85% (prone) / 81% (supine) of reached states
+catchable at some moment, but the per-moment rate is only 38-56% (selection effect). Supine is flat at 45-56% from entry to +60 steps; prone peaks at 50% five steps before entry (38% at entry) and collapses to <10% afterwards.
+Loosening the region (level 1.0 -> 0.6) raises reach (prone 63 -> 79%, supine 44 -> 58%) but the number held stays at ~22% of starts.
+
+**4. Rule-based controller** (`scripts/controller.py`: pick the floor policy by pitch sign, hand over at region entry, fall back to the floor policy when the stand policy falls): **24% of starts end standing at 20 s with fall-back
+(supine 37/159, prone 12/41), 18% without**; hand-over happens in 58% of starts. Earlier A/C comparison (24 vs 26%) pointed the other way, so the fall-back effect is within the noise (+-6).
+
+**Where this leaves the project.** Both floor policies get to the stand-ready region in 44-63% of starts; the stand policy then holds about 42% of those, and nothing tried (fine-tuning on the pool in four variants, trigger and timing,
+loosened regions, a COM condition in the floor policy, training the stand policy from scratch) moved that number. States it loses have the centre of mass ~10 cm ahead of the front foot (AUC 0.26), i.e. need a step; whether
+the stand policy can learn that is open. Open: the paused x1 replica (`v46`), a dedicated capture-step policy, a learned hand-over selector (only worth it if a classifier on the labelled snapshots reaches AUC >= 0.8; not tried).

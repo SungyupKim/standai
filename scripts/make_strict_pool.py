@@ -17,6 +17,7 @@ p.add_argument("--n", type=int, default=2000)
 p.add_argument("--prone-frac", type=float, default=0.0)
 p.add_argument("--first-seed", type=int, default=1000)
 p.add_argument("--out", required=True)
+p.add_argument("--deterministic", action="store_true", help="never sample actions (evaluation sets)")
 a = p.parse_args()
 
 model = PPO.load(a.ckpt, device="cpu")
@@ -24,7 +25,7 @@ env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, prone_frac=a.pro
 qpos, qvel, heads, tries, seed = [], [], [], 0, a.first_seed
 while len(qpos) < a.n and tries < a.n * 5:
     obs, _ = env.reset(seed=seed)
-    stochastic = seed % 2 == 1
+    stochastic = seed % 2 == 1 and not a.deterministic
     seed += 1; tries += 1
     for _ in range(450):
         action, _ = model.predict(obs, deterministic=not stochastic)

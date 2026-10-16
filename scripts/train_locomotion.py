@@ -578,23 +578,148 @@ class BurstArchiveCallback(BaseCallback):
 
 
 class HandoffPoolCallback(BaseCallback):
-    """Starts a fraction of episodes from states the FLOOR get-up policy hands over (make_handoff_pool.py).
+    """Starts a fraction of episodes from states the FLOOR get-up policy hands over (make_handoff_pool.py / make_strict_pool.py).
 
-    The stand policy never practised those states (it caught ~10% of them), so they are handed to the envs once as the
-    replay pool (set_replay_pool, same mechanism as the failed-start replay); the rest of the resets keep the normal
-    calm / harsh distribution. The pool is fixed (not refreshed from the policy being trained)."""
+    The stand policy never practised those states (it caught ~10% of them), so they are handed to the envs as the replay pool
+    (set_replay_pool, same mechanism as the failed-start replay); the rest of the resets keep the normal calm / harsh distribution.
+    The pool is fixed (not refreshed from the policy being trained).
 
-    def __init__(self, path, frac=0.4):
+    Three modes for the pool share:
+      constant        (default)               `frac` from step 0 -- v39 with 0.4 ended up falling flat even from upright starts
+      step ramp       ramp_steps > 0          0 before ramp_start, then linear up to `frac` over ramp_steps
+      performance gate gate_calm is not None  every gate_every steps a deterministic calm gate (gate_n fixed seeds, 3 s, the same test as
+                                              stand_progress_notify) runs inside the trainer: share += gate_step if the gate fraction is
+                                              >= gate_calm, share -= gate_step if it is < gate_calm / 2, else unchanged; capped at `frac`
+                                              (same idea as CurriculumGateCallback: advance on results, not on a timer)"""
+
+    UPDATE_EVERY = 100_000
+
+    def __init__(self, path, frac=0.4, ramp_start=0, ramp_steps=0, gate_calm=None, gate_step=0.025, gate_every=500_000, gate_n=40,
+                 fail_weight=0, fail_every=1_000_000, fail_n=300):
         super().__init__()
         self.path, self.frac = path, frac
+        self.ramp_start, self.ramp_steps = ramp_start, ramp_steps
+        self.gate_calm, self.gate_step, self.gate_every, self.gate_n = gate_calm, gate_step, gate_every, gate_n
+        self._pool, self._last_update, self._cur = None, -10**12, None
+        self._gated, self._last_gate, self._gate_env, self._gate_val = 0.0, 0, None, None
+        self.fail_weight, self.fail_every, self.fail_n = fail_weight, fail_every, fail_n
+        self._status, self._fail_cursor, self._last_fail_eval, self._pool_env = None, 0, 0, None
+
+    def _frac_now(self):
+        if self.gate_calm is not None:
+            return self._gated
+        if self.ramp_steps <= 0:
+            return self.frac
+        t = (self.num_timesteps - self.ramp_start) / self.ramp_steps
+        return self.frac * min(1.0, max(0.0, t))
+
+    def _push(self):
+        cur = round(self._frac_now(), 4)
+        if cur != self._cur:
+            self.training_env.env_method("set_replay_pool", self._pool, cur)
+            self._cur = cur
+        self._last_update = self.num_timesteps
+
+    def _calm_gate(self):
+        from env import FALL_HEIGHT
+        from locomotion_env import LocomotionEnv
+        if self._gate_env is None:
+            self._gate_env = LocomotionEnv(stand_only=True)
+            self._gate_env.set_calm_frac(1.0)
+        env, ok = self._gate_env, 0
+        for seed in range(self.gate_n):
+            obs, _ = env.reset(seed=seed)
+            fell = False
+            for _ in range(150):
+                action, _ = self.model.predict(obs, deterministic=True)
+                obs, _r, term, trunc, _info = env.step(action)
+                if env.data.xpos[env.a_torso_id][2] < FALL_HEIGHT:
+                    fell = True
+                    break
+                if term or trunc:
+                    break
+            ok += (not fell)
+        return ok / self.gate_n
+
+    def _hold_from_pool_state(self, i):
+        """3 s hold test from pool state i with the current policy (deterministic): True if the torso never drops below FALL_HEIGHT."""
+        import mujoco
+        from env import FALL_HEIGHT
+        from locomotion_env import LocomotionEnv
+        if self._pool_env is None:
+            self._pool_env = LocomotionEnv(stand_only=True)
+        env = self._pool_env
+        env.reset(seed=i)
+        q, v, _ = self._pool[i]
+        env.data.qpos[:], env.data.qvel[:] = q, v
+        mujoco.mj_forward(env.model, env.data)
+        env._prev_com_x = None
+        obs = env._obs()
+        for _ in range(150):
+            action, _ = self.model.predict(obs, deterministic=True)
+            obs, _r, term, trunc, _info = env.step(action)
+            if env.data.xpos[env.a_torso_id][2] < FALL_HEIGHT:
+                return False
+            if term or trunc:
+                break
+        return True
+
+    def _fail_weighted_refresh(self):
+        """Re-test a rotating chunk of the pool with the current policy, then rebuild the replay list: states it fails are repeated
+        `fail_weight` times, passed ones once, never-tested ones twice (so the policy keeps practising what it cannot yet catch)."""
+        n = len(self._pool)
+        idx = [(self._fail_cursor + k) % n for k in range(min(self.fail_n, n))]
+        self._fail_cursor = (self._fail_cursor + len(idx)) % n
+        passed = 0
+        for i in idx:
+            ok = self._hold_from_pool_state(i)
+            self._status[i] = 1 if ok else 2
+            passed += ok
+        weights = np.where(self._status == 2, self.fail_weight, np.where(self._status == 1, 1, 2))
+        expanded = [self._pool[i] for i in range(n) for _ in range(int(weights[i]))]
+        self.training_env.env_method("set_replay_pool", expanded, round(self._frac_now(), 4))
+        self._cur = round(self._frac_now(), 4)
+        known = int((self._status > 0).sum()); failed = int((self._status == 2).sum())
+        self._pass_rate = passed / max(len(idx), 1)
+        print(f"[locomotion] pool refresh at {self.num_timesteps} steps: chunk pass {passed}/{len(idx)}, known {known}/{n}, failing {failed}, "
+              f"replay list {len(expanded)}", flush=True)
 
     def _on_training_start(self):
         d = np.load(self.path, allow_pickle=True)
-        pool = [(q, v, False) for q, v in zip(d["qpos"], d["qvel"])]
-        self.training_env.env_method("set_replay_pool", pool, self.frac)
-        print(f"[locomotion] hand-off pool: {len(pool)} states from {self.path} ({d['floor_ckpt']}), frac {self.frac}", flush=True)
+        self._pool = [(q, v, False) for q, v in zip(d["qpos"], d["qvel"])]
+        self._status = np.zeros(len(self._pool), dtype=np.int8)
+        self._last_gate = self.num_timesteps
+        self._last_fail_eval = self.num_timesteps
+        self._pass_rate = None
+        self._push()
+        mode = (f", performance gate: calm gate >= {self.gate_calm} -> +{self.gate_step}, < {self.gate_calm / 2} -> -{self.gate_step}, every {self.gate_every} steps, max {self.frac}"
+                if self.gate_calm is not None else
+                f", ramp 0 -> {self.frac} over {self.ramp_steps} steps from step {self.ramp_start}" if self.ramp_steps > 0 else "")
+        print(f"[locomotion] hand-off pool: {len(self._pool)} states from {self.path} ({d['floor_ckpt']}), frac {self._cur}{mode}", flush=True)
 
     def _on_step(self):
+        if self.fail_weight > 0 and self.num_timesteps - self._last_fail_eval >= self.fail_every:
+            self._last_fail_eval = self.num_timesteps
+            self._fail_weighted_refresh()
+            self.logger.record("handoff/pool_chunk_pass", self._pass_rate)
+        if self.gate_calm is not None:
+            if self.num_timesteps - self._last_gate >= self.gate_every:
+                self._last_gate = self.num_timesteps
+                g = self._calm_gate()
+                self._gate_val = g
+                if g >= self.gate_calm:
+                    self._gated = min(self.frac, self._gated + self.gate_step)
+                elif g < self.gate_calm / 2:
+                    self._gated = max(0.0, self._gated - self.gate_step)
+                self._push()
+                print(f"[locomotion] pool gate at {self.num_timesteps} steps: calm gate {g:.3f} -> pool share {self._cur}", flush=True)
+            self.logger.record("handoff/frac", self._cur)
+            if self._gate_val is not None:
+                self.logger.record("handoff/calm_gate_inproc", self._gate_val)
+        elif self.ramp_steps > 0:
+            if self.num_timesteps - self._last_update >= self.UPDATE_EVERY:
+                self._push()
+            self.logger.record("handoff/frac", self._cur)
         return True
 
 
@@ -617,7 +742,7 @@ class FallRateCallback(BaseCallback):
 
 
 def main():
-    global LOG_STD_MIN
+    global LOG_STD_MIN, LOG_STD_MAX
     parser = argparse.ArgumentParser()
     parser.add_argument("--timesteps", type=int, default=5_000_000)
     parser.add_argument("--n-envs", type=int, default=4)
@@ -670,10 +795,27 @@ def main():
     parser.add_argument("--handoff-pool", type=str, default=None,
                          help="npz from make_handoff_pool.py: start --handoff-frac of the episodes from the states the "
                               "floor get-up policy hands over (stand-only)")
-    parser.add_argument("--handoff-frac", type=float, default=0.4)
+    parser.add_argument("--handoff-frac", type=float, default=0.4,
+                         help="share of episode starts drawn from the pool (the END value when --handoff-ramp-steps > 0)")
+    parser.add_argument("--handoff-gate-calm", type=float, default=None,
+                         help="performance-gated pool share: every --handoff-gate-every steps run a deterministic calm gate inside the trainer; "
+                              "share += --handoff-gate-step if the gate fraction >= this, -= if < half of it (cap: --handoff-frac)")
+    parser.add_argument("--handoff-fail-weight", type=int, default=0,
+                         help="> 0: every --handoff-fail-every steps re-test a chunk of the pool with the current policy and repeat the states it fails "
+                              "this many times in the replay list (failure-weighted replay); 0 = uniform")
+    parser.add_argument("--handoff-fail-every", type=int, default=1_000_000)
+    parser.add_argument("--handoff-gate-step", type=float, default=0.025)
+    parser.add_argument("--handoff-gate-every", type=int, default=500_000)
+    parser.add_argument("--handoff-ramp-start", type=int, default=0, help="step at which the pool share starts to rise (with --handoff-ramp-steps)")
+    parser.add_argument("--handoff-ramp-steps", type=int, default=0,
+                         help="> 0: raise the pool share linearly from 0 to --handoff-frac over this many steps (default 0 = constant share)")
     parser.add_argument("--std-min", type=float, default=None,
                          help="raise the lower bound of the policy action std (default keeps 0.05); also applied "
                               "once at load so a shrunken std is lifted immediately")
+    parser.add_argument("--std-max", type=float, default=None,
+                         help="upper bound of the policy action std (default 0.6, which is also the starting std because the clamp pulls the "
+                              "initial std down to it). The action is multiplied by the actuator gear, so the same std is a 1.5x larger torque noise on "
+                              "the x1.5 body: 0.4 keeps the torque noise of the x1 runs")
     parser.add_argument("--knee-gate", action="store_true",
                          help="fade the knee_avoid reward out by head height (0 below 0.5 m, full at 0.9 m) so "
                               "raising the legs while lying isn't paid -- only meaningful with --stand-only")
@@ -734,6 +876,12 @@ def main():
         model = PPO("MlpPolicy", vec_env, device=args.device, verbose=1, **kwargs)
         print("[locomotion] training from scratch", flush=True)
 
+    if args.std_max is not None:
+        LOG_STD_MAX = float(np.log(args.std_max))
+        with torch.no_grad():
+            before_std = model.policy.log_std.exp().mean().item()
+            model.policy.log_std.data.clamp_(min=LOG_STD_MIN, max=LOG_STD_MAX)
+            print(f"[locomotion] std cap {args.std_max}: mean action std {before_std:.3f} -> {model.policy.log_std.exp().mean().item():.3f}", flush=True)
     if args.std_min is not None:
         LOG_STD_MIN = float(np.log(args.std_min))
         with torch.no_grad():
@@ -766,7 +914,11 @@ def main():
     if args.stand_only and args.replay_curriculum:
         callback_list.append(ReplayCurriculumCallback(frac=args.replay_frac))
     if args.stand_only and args.handoff_pool:
-        callback_list.append(HandoffPoolCallback(args.handoff_pool, frac=args.handoff_frac))
+        callback_list.append(HandoffPoolCallback(args.handoff_pool, frac=args.handoff_frac,
+                                                 ramp_start=args.handoff_ramp_start, ramp_steps=args.handoff_ramp_steps,
+                                                 gate_calm=args.handoff_gate_calm, gate_step=args.handoff_gate_step,
+                                                 gate_every=args.handoff_gate_every,
+                                                 fail_weight=args.handoff_fail_weight, fail_every=args.handoff_fail_every))
     if args.stand_only and args.burst_archive_frac > 0.0:
         callback_list.append(BurstArchiveCallback(frac=args.burst_archive_frac))
     if args.colored_noise_rho > 0.0:

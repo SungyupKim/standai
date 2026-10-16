@@ -11,14 +11,17 @@ Check before assuming anything is idle or stale:
 ```bash
 pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py|train_floor.py|floor_progress_notify.py|watch_floor.py"
 ```
-**State of play (2026-10-15):** three policies (details: `README.md` status table, `docs/experiments_2026-10-11.md` 3.17, `docs/TECHNICAL_SUMMARY.md` 6).
-- Supine floor policy `ppo_floor_v12` (best used: `autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip`): reaches the stand-ready region from 55% of its starts.
-- Prone floor policy `ppo_floor_prone8` (`checkpoints/best_prone8.zip` = 86.5M; 77.45M / 82M / 84.25M / 97.8M are statistically the same, ~58% reach, ~22% held): training stopped at ~100M, plateau since ~77M.
-- Stand policy: `v37`@96M is the one used for hand-over measurements. `v38` (hand-off pool 40%) FINISHED at 136M with no gain: it catches 8/150 of the loose hand-off set vs 11/150 for `v37`@96M, calm gate (30 seeds) 0.37-0.53. A from-scratch retrain on a broader mix is next (pool files `checkpoints/pool_*.npz` from `scripts/make_strict_pool.py`).
-- Best end-to-end system today: floor policy by start-pitch sign -> `v37` (~26% end up standing; a loop back to the floor policy on a fall gives nothing, floor policies alone 4%). The selector/switch is not built.
-- Floor runs use `--no-down-timeout` (env.py's 5 s "stayed down" KO off), `--max-steps 450`, `--standready`; `--prone-frac 1.0` = prone starts only; the staged target is `--level-start 0.0` (works only from a network that already gets high).
-- Pick floor checkpoints by re-measuring candidates on the SAME 400 seeds (`scripts/analysis/eval_ckpt.py`); 200-seed "bests" were noise. State the "held" criterion every time (never below 0.7 m for 3 s vs torso >= 0.7 m at 3 s differ hugely for the floor policies).
-Check for running processes first (above). As of this edit only the strict-pool builders (`make_strict_pool.py`) may be running.
+**State of play (2026-10-17):** three policies + a rule-based controller (details: `README.md` status table, `docs/experiments_2026-10-11.md` 3.17 and 3.18, `docs/TECHNICAL_SUMMARY.md` 6 and 7).
+- Supine floor policy `ppo_floor_v12` (`autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip`), prone floor policy `ppo_floor_prone8` (`checkpoints/best_prone8.zip` = 86.5M; 77.45M / 82M / 84.25M / 97.8M are statistically the same).
+- Stand policy: **`v37`@96M is the one to use** (127/300 of the strict hand-off evaluation set `checkpoints/eval_strict_all.npz`, calm gate ~50). `v38`, `v47` (hand-off pool fine-tuning) and `v39`-`v45` (from scratch) all FAILED to improve it
+  (docs 3.18). Pool for training: `checkpoints/pool_strict_all.npz` (8,000 states, `scripts/make_strict_pool.py`).
+- Best end-to-end system: `scripts/controller.py` (`GetUpController`) ~24% standing at 20 s (`scripts/analysis/controller_eval.py 1.0 1 200 1000`).
+- **Possibly running:** `ppo_stand_v46_v21like` (x1 body + `STANDAI_NO_RECOVERY_GATE=1`, fresh, no pool; a v21 replica; log `checkpoints/locomotion_train_stand_v46.log`, notifier `stand_progress_notify_v46.log`). Verdict still open: v21 had 5/100 at 8.65M, 15/100 at 17.7M.
+  If it was paused: `kill -CONT <pid and its forkserver children>`. ALWAYS `ps -o pid,etime,cmd -C python` (with env: `tr '\0' '\n' < /proc/<pid>/environ | grep STANDAI`) before launching a new run: a duplicate launch already happened once.
+- Floor runs use `--no-down-timeout` (env.py's 5 s "stayed down" KO off), `--max-steps 450`, `--standready`; `--prone-frac 1.0` = prone starts only; the staged target is `--level-start 0.0` (works only from a network that already gets high; from scratch it never left level 0).
+- Pick checkpoints by re-measuring candidates on the SAME 400 seeds (`scripts/analysis/eval_ckpt.py`); state the "held" criterion every time (never below 0.7 m for 3 s vs torso >= 0.7 m at 3 s differ hugely for the floor policies).
+- **Do not trust the trainer's `fall_rate` / `ep_len_mean` for stand runs:** the training-time knee floor (-50 -> -80 deg in calm episodes) is a rigid support (KO 16/16 without it, 10/16 with it, for a policy whose real gate is 0). Use the fixed-seed gate and
+  `scripts/analysis/stand_posture_diag.py` / `stand_longrun_diag.py`. Use the system `.venv/bin/python` (system python3 has no numpy).
 **Body spec changed (2026-10-11): limb actuator gears are x1.5 by default** (`BODY_GEAR_SCALE` in
 `locomotion_env.py`, hip 270 / knee 90 / ankle 60; root_x/root_ry untouched). Reason: a closed-loop MPC
 oracle stands from only 2/6 lying starts at x1 but 5/6 at x1.5 (same as x2), and an unchanged policy
