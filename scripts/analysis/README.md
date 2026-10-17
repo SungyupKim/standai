@@ -50,6 +50,7 @@ stand policy `ppo_stand_v37_ladder_..._96000000_steps.zip`; edit the constants a
 | `handoff_timing_oracle.py <floor ckpt> <n> <prone_frac>` | hold rate by hand-over offset around the region entry (and the multiple-testing oracle) |
 | `handoff_level_sweep.py <floor ckpt> <n> <prone_frac> <levels>` | hand over at a looser region level; reach and held per level |
 | `controller_eval.py <level> <fall_back> <n> [steps]` | end-to-end standing of the rule-based `scripts/controller.py` |
+| `benchmark.py [--stand CKPT] [--supine CKPT] [--prone CKPT] [--tag NAME] [--quick]` | **whole system in one table (about 4 min):** stand catch on the 300 held-out hand-off states, upright-start gate by knee bend, both floor policies' reach and hold, controller end-to-end; baseline `benchmark_baseline_v37_v12_prone8.json` |
 
 `getup_cem.py` / `getup_mpc.py` replicate `env.step`'s stand-only physics in a light rollout
 (verified identical to `env.step`, max |dz| = 0.0000). The MPC is a *diagnostic*, not a teacher: it

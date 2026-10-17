@@ -331,3 +331,31 @@ Loosening the region (level 1.0 -> 0.6) raises reach (prone 63 -> 79%, supine 44
 **Where this leaves the project.** Both floor policies get to the stand-ready region in 44-63% of starts; the stand policy then holds about 42% of those, and nothing tried (fine-tuning on the pool in four variants, trigger and timing,
 loosened regions, a COM condition in the floor policy, training the stand policy from scratch) moved that number. States it loses have the centre of mass ~10 cm ahead of the front foot (AUC 0.26), i.e. need a step; whether
 the stand policy can learn that is open. Open: the paused x1 replica (`v46`), a dedicated capture-step policy, a learned hand-over selector (only worth it if a classifier on the labelled snapshots reaches AUC >= 0.8; not tried).
+
+## 8. Update 2026-10-17: the knee floor is a crutch; removing it lets a stand policy learn from scratch (so far); one-command benchmark
+
+**The knee floor.** During stand training, calm (upright-start) episodes clamp the knee angle at -50 -> -80 deg every step (`KneeScaffoldCallback`; a position clamp, not a force). The body model's real knee range is -140 deg
+(a human knee flexes roughly 135-150 deg, not verified against a source), so the clamp keeps only the upper ~57% of the model's flexion. It was added because policies retreated into a deep crouch within a second
+(the "escape hatch" comment in `locomotion_env.py`); the working hypothesis (the user's) is that the x1 body was too weak to rise from a deep crouch, so the clamp compensated for it. Evaluation, hand-over, the
+controller and the floor environments never apply it, so a policy trained with the clamp leans on it: re-run in a trainer-like vector env the same checkpoint is KO'd in 16/16 episodes with no scaffold and 10/16 with the clamp.
+
+**`v48`** = the failed `v45` setup (x1.5 body, v21-era reward without the recovery gate, std cap 0.4, no pool) with only the clamp removed (`--no-knee-floor`). Six earlier from-scratch runs (with the clamp) stayed at gate 0 up to 55M steps;
+`v48` leaves 0 at ~5M steps. Fixed-seed alarm gates (30 upright starts): 0 -> 0.17 (5M) -> 0.30 (7M) -> 0.47 (10M), then flat at 0.37-0.47 up to 16.5M.
+
+**One-command benchmark** (`scripts/analysis/benchmark.py`, ~4 min, 200 seeds): stand catch on the 300 held-out hand-off states, upright-start gate split by knee bend, both floor policies' reach and hold, controller end-to-end.
+
+| | `v37`@96M (reference) | `v48`@16.8M |
+|---|---|---|
+| hand-off states held upright (of 300) | **127 (42%)** | 88 (29%) |
+| upright-start gate (100 seeds) | **51** | 41 |
+| by knee bend: >= -10 / -25..-10 / -40..-25 / < -40 deg | **90 / 68 / 43 / 23 %** | 71 / 54 / 40 / 16 % |
+| supine / prone floor policy -> stand holds 3 s (share of starts) | **28 / 22 %** | 19 / 12 % |
+| rule-based controller, standing at 20 s | **24%** | 20% |
+
+`v48` is below `v37` everywhere, but `v37` has ~96M steps and `v48` 16.8M (the from-scratch precedent `v21` had 15/100 at 17.7M). The 30-seed alarm gate (0.37-0.47) had looked close to `v37`; the benchmark does not agree, so alarm gates are
+only a direction check. Next decision point: benchmark `v48` every ~10M steps; if the hand-off catch passes 127 it replaces `v37`, if it plateaus the project is back at the catch wall of section 7. If it works, the stand policy is also the only
+owner of crouched starts, which the table shows to be its weak spot (23-43% below -25 deg).
+
+**Compatibility check for retuning the stand policy:** the floor policies share only the body (gear), the 70-dim observation and the action semantics with the stand policy; rewards, exploration (std), pool share and curriculum are
+stand-training-only (`FloorEnv` discards the parent reward), so those can be retuned without touching the floor policies. Jerk/effort penalties are not part of the stand-only reward (the proposal to scale them with gear was moot).
+New options: `train_locomotion.py --no-knee-floor`, `train_floor.py --supine-frac` (supine-start-only floor training, not run yet), `scripts/controller.py` + `controller_eval.py`.

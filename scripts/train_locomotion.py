@@ -816,6 +816,9 @@ def main():
                          help="upper bound of the policy action std (default 0.6, which is also the starting std because the clamp pulls the "
                               "initial std down to it). The action is multiplied by the actuator gear, so the same std is a 1.5x larger torque noise on "
                               "the x1.5 body: 0.4 keeps the torque noise of the x1 runs")
+    parser.add_argument("--no-knee-floor", action="store_true",
+                         help="do NOT run KneeScaffoldCallback: calm episodes keep the full knee range (-140 deg) instead of the -50 -> -80 deg clamp "
+                              "(the clamp is a rigid support the policy learns to lean on; evaluation and hand-over never have it)")
     parser.add_argument("--knee-gate", action="store_true",
                          help="fade the knee_avoid reward out by head height (0 below 0.5 m, full at 0.9 m) so "
                               "raising the legs while lying isn't paid -- only meaningful with --stand-only")
@@ -897,7 +900,7 @@ def main():
     )
     callback_list = [checkpoint_callback, BreakdownCallback(), FallRateCallback(),
                       LogStdClampCallback(),
-                      KneeScaffoldCallback(args.timesteps, already_relaxed=args.knee_already_relaxed),
+                      *([] if args.no_knee_floor else [KneeScaffoldCallback(args.timesteps, already_relaxed=args.knee_already_relaxed)]),
                       VelocityAssistCallback(args.timesteps, already_relaxed=args.assist_already_relaxed)]
     if args.stand_only:
         curriculum_kwargs = {} if args.calm_end_frac is None else {"end_frac": args.calm_end_frac}

@@ -107,6 +107,7 @@ def main():
     p.add_argument("--level-step", type=float, default=0.05)
     p.add_argument("--com-max", type=float, default=None, help="stand-ready also needs COM x - front foot x <= this (m); e.g. 0.06; default off")
     p.add_argument("--no-down-timeout", action="store_true", help="disable env.py's 5 s 'stayed down' KO so only --max-steps ends an episode")
+    p.add_argument("--supine-frac", type=float, default=0.0, help="share of lying starts forced to the start-pitch > 0 side (inferred supine); 1.0 = supine only")
     p.add_argument("--learning-rate", type=float, default=None, help="override the (saved) PPO learning rate, e.g. 1e-4 when approx_kl/clip_fraction stay far above ~0.05/0.3")
     p.add_argument("--save-freq", type=int, default=25_000)
     p.add_argument("--ent-coef", type=float, default=0.002)
@@ -125,7 +126,7 @@ def main():
                            env_kwargs={"settled": args.settled, "standready": args.standready, "crouch_frac": args.crouch_frac,
                                        "speed_pen": args.speed_pen, "air_pen": args.air_pen,
                                        "speed_vz_w": args.speed_vz_w, "max_steps": args.max_steps,
-                                       "prone_frac": args.prone_frac,
+                                       "prone_frac": args.prone_frac, "supine_frac": args.supine_frac,
                                        "down_timeout": not args.no_down_timeout,
                                        "level": args.level_start, "com_max": args.com_max})
     if args.init_from:

@@ -73,7 +73,7 @@ _MAX_RESAMPLE = 30
 
 
 class FloorEnv(LocomotionEnv):
-    def __init__(self, settled=False, standready=False, crouch_frac=0.4, speed_pen=0.0, air_pen=0.0, speed_vz_w=1.0, max_steps=None, prone_frac=0.0, down_timeout=None, level=1.0, com_max=None, **kwargs):
+    def __init__(self, settled=False, standready=False, crouch_frac=0.4, speed_pen=0.0, air_pen=0.0, speed_vz_w=1.0, max_steps=None, prone_frac=0.0, down_timeout=None, level=1.0, com_max=None, supine_frac=0.0, **kwargs):
         super().__init__(stand_only=True, **kwargs)
         self._level = float(level)
         # optional stand-ready condition: centre of mass x minus the FRONT foot x <= com_max (m). Hand-off states the stand policy
@@ -92,6 +92,7 @@ class FloorEnv(LocomotionEnv):
         # The natural split is ~80/20 and v12 @101.5M reaches 51% of the + side but 1/41 of the - side (200 seeds), so training
         # oversamples it. 0 = natural distribution (the evaluations keep 0, so fixed-seed numbers stay comparable).
         self._prone_frac = prone_frac
+        self._supine_frac = supine_frac      # same for the start-pitch > 0 side (inferred supine); prone_frac and supine_frac are exclusive
         self._start_side = "pos"
         # episode length: None = SR_MAX_STEPS (standready) / FLOOR_MAX_STEPS. v11 @98.8M, lying starts, 100 seeds: 300 steps
         # reached 31 / held 16, 450 steps 39 / 20, 750 steps 42 / 22 (the median reach is at step 202, the top quartile >310)
@@ -152,8 +153,10 @@ class FloorEnv(LocomotionEnv):
             self._start_kind = "crouch"
         else:
             want_neg = self._prone_frac > 0.0 and self.np_random.random() < self._prone_frac
+            want_pos = (not want_neg) and self._supine_frac > 0.0 and self.np_random.random() < self._supine_frac
             for _ in range(_MAX_RESAMPLE):
-                if self.data.xpos[self.a_torso_id][2] < FLOOR_START_Z and (not want_neg or self._start_pitch() <= 0.0):
+                if self.data.xpos[self.a_torso_id][2] < FLOOR_START_Z and (not want_neg or self._start_pitch() <= 0.0) \
+                        and (not want_pos or self._start_pitch() > 0.0):
                     break
                 obs, info = super().reset(options=options)
         self._start_side = "neg" if self._start_pitch() <= 0.0 else "pos"
