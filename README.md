@@ -165,3 +165,7 @@ Standing (from any posture, held reliably) → walking (reintroducing velocity t
 the resulting policy back into fightai's combat action/observation space via
 `transplant_locomotion.py` (still in fightai) — each stage gated on the previous one actually
 working.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). `build_model.py`, `env.py`, `view.py` and `kakao_notify.py` are copies of files from the author's `fightai` project.
