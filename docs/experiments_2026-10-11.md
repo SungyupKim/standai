@@ -697,6 +697,26 @@ v54는 20.7M에서 종료(13.5M 이후 정체, std가 계속 줄어듦).
 재현(v54): `STANDAI_NO_RECOVERY_GATE=1 STANDAI_HARSH_MIN_TORSO=0.7 STANDAI_START_VEL_POOL=../checkpoints/pool_big_all.npz STANDAI_START_VEL_PROB=0.6 STANDAI_START_VEL_JOINT=3.5 STANDAI_MIX_POOL=../checkpoints/pool_big_all.npz STANDAI_MIX_PROB=0.3 STANDAI_MIX_LAM_LO=0.7`
 `train_locomotion.py --n-envs 8 --timesteps 40000000 --stand-only --height-start-scale 9.0 --height-end-scale 15.0 --height-relax-frac 0.1 --curriculum-fall-gate 0.65 --curriculum-streak-gate 350 --calm-already-relaxed --calm-end-frac 0.5 --std-max 0.4 --no-knee-floor --learning-rate 5e-5 --init-from <v53 @10M>`.
 
+### 3.21 컨트롤러 인계 영역을 느슨하게(0.7) 하면 20초 서기율 41 -> 50 % (2026-10-18)
+
+v54(서기) + v12(누운) + prone8(엎드린) 컨트롤러에서 인계 영역의 엄격도(`FloorEnv(level=…)`; 1.0 = 엄격 서기 준비 영역, 0.0 = 가장 느슨)만 바꾼 결과, 20초 뒤 서 있는 비율(쪽별 200시드, 50:50 평균):
+
+| 영역 | 누운쪽 인계 / 서기 | 엎드린쪽 인계 / 서기 | 50:50 서기 |
+|---|---|---|---|
+| 1.00 | 60 % / 42 % | 76 % / 40 % | 41 % |
+| 0.85 | 70 % / 46 % | 83 % / 48 % | 48 % |
+| **0.70** | 78 % / 46 % | 87 % / 53 % | **50 %** |
+| 0.55 | 82 % / 46 % | 92 % / 52 % | 49 % |
+
+(100시드 첫 측정: 1.0 43 %, 0.7 53 %, 0.4 46 %, 0.0 39 %.) 0.85~0.55는 구분되지 않고 1.0과의 차이(7~9 %p)만 확실하다. 서기 정책이 v37이던 때는 영역을 느슨하게 해도 버팀 총수가 변하지 않았는데(3.18), 강해진 v54에서는 느슨한 영역에서도 받아낸다.
+`benchmark.py --handover-level`(기본값을 1.0에서 0.7로 바꿈; 이전 숫자는 1.0으로 재현). 인계 시점을 상태별로 학습해 정하는 방법은 아직 시도 전이다.
+
+**v12가 누운 시작에서 영역에 못 닿는 이유**(`analysis/floor_miss_classify.py`, 누운 시작 159개 중 87개 도달 55 %): 못 일어남(토르소 < 0.7 m) 14개(9 %); 일어나다 멈춤(0.7~1.08 m, 중앙값 0.88 m)과 1.08 m는 넘었으나 6개 조건 미달(발 23, 기울기 13, 기울기 속도 12, 무릎 5)이 나머지다(누운·엎드린 시작 합계 기준 59개, 24개).
+같은 정책의 제한 스텝을 300 -> 450 -> 750으로 늘리면 도달 31 -> 39 -> 42 %였다.
+
+**누운 바닥 정책 처음부터**: 낮은 학습률(supine2 1e-4, supine3 3e-5 + `--target-kl 0.03`)에서 몸을 일으키는 법을 배우지 못했다(머리 0.5 m 넘는 비율 12~32 %, 단계 0에서 못 벗어남). 원래 계보(v2 -> v4 -> v6)는 **기본 학습률 3e-4의 큰 업데이트로 먼저 일어서는 법을 배운 뒤** 목표를 조였다.
+1단계(`ppo_floor_s4a`: 누운 시작만, 느슨한 목표, 기본 학습률, 5 M 스텝)는 머리 0.5 m 넘기 99 %, 성공 56 %(학습 로그)/44 %(결정적)까지 갔다. 2단계(`ppo_floor_s4b`: s4a에서 이어, 서기 준비 영역 + 단계적 목표 `--level-start 0.0`, 학습률 1e-4)는 진행 중이다.
+
 ## 4. 문헌 (원문에서 확인한 것만)
 
 - Tao, Wilson, Gou, van de Panne, "Learning to Get Up", SIGGRAPH 2022. 1단계는 설계 토크 100%의

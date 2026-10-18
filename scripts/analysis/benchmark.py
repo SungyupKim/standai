@@ -8,7 +8,7 @@ Sections (each runs in its own worker process, fixed seeds, deterministic action
   stand_calm    stand policy from upright (calm) starts, 3 s gate, and the same split by initial knee bend (crouched starts are the weak spot)
   floor_supine  supine floor policy on supine-side starts only: reached the region / the stand policy then holds 3 s (never below 0.7 m)
   floor_prone   same for the prone policy on prone-side starts
-  controller    rule-based GetUpController on the natural start mix, 20 s: standing at 10 s / at the end (torso >= 0.95 m, |pitch| < 30 deg)
+  controller    rule-based GetUpController on the natural start mix, 20 s: standing at 10 s / at the end (torso >= 0.95 m, |pitch| < 30 deg); hand-over region --handover-level (default 0.7)
 Prints one table and writes checkpoints/analysis/benchmark_<tag>.json. --quick uses a quarter of the seeds (about 1/3 of the time, noisier).
 Run it with nice while a training run is going, e.g.  nice -n 10 .venv/bin/python -I scripts/analysis/benchmark.py --tag v48_x
 """
@@ -101,12 +101,12 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n, side=None):
+def task_controller(supine, prone, stand, n, side=None, level=1.0):
     _setup()
     import numpy as np
     from controller import GetUpController
     from floor_env import FloorEnv
-    env = FloorEnv(standready=True, level=1.0, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
+    env = FloorEnv(standready=True, level=level, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
     ctl = GetUpController(supine, prone, stand, fall_back=True)
     s10 = send = hand = 0
@@ -137,6 +137,7 @@ def main():
     p.add_argument("--tag", default="default")
     p.add_argument("--quick", action="store_true")
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--handover-level", type=float, default=0.7, help="controller hand-over region: 1.0 = strict stand-ready region, lower = looser; 0.7 (default since 2026-10-18) was best with v54 (docs 3.21); pass 1.0 to reproduce older numbers")
     a = p.parse_args()
     d = 4 if a.quick else 1
     n_calm, n_floor, n_ctl = 200 // d, 200 // d, 200 // d
@@ -147,9 +148,9 @@ def main():
             "stand_calm": ex.submit(task_stand_calm, a.stand, n_calm),
             "floor_supine": ex.submit(task_floor, "supine", a.supine, a.stand, n_floor),
             "floor_prone": ex.submit(task_floor, "prone", a.prone, a.stand, n_floor),
-            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl),
-            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine"),
-            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone"),
+            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl, None, a.handover_level),
+            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine", a.handover_level),
+            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone", a.handover_level),
         }
         res = {k: f.result() for k, f in futs.items()}
     res["checkpoints"] = {k: os.path.basename(getattr(a, k)) for k in DEFAULTS}

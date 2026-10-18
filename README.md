@@ -12,7 +12,7 @@ rigorous track rather than being a side quest.
 
 The stand policy is now `checkpoints/best_stand_v54.zip` (`v54` @20.3M): the controller (floor policy -> stand policy hand-over) stands after 20 s in **41%** of starts (50:50 supine/prone average, 200 seeds per side; the previous stand policy `v37`: 29%).
 The gain came from lowering the PPO learning rate (5e-5) on a stand run whose `approx_kl` was 0.09: the earlier runs were not improving, they were jumping by +-50 hand-off catches between checkpoints. The benchmark now prints each start side and a 50:50 average,
-because the environment's 80:20 supine/prone split of lying starts turned out to be an artefact of its collapse generator (docs/experiments_2026-10-11.md 3.20). In progress: the supine floor policy retrained from scratch (`ppo_floor_supine2`).
+because the environment's 80:20 supine/prone split of lying starts turned out to be an artefact of its collapse generator (docs/experiments_2026-10-11.md 3.20). With the controller's hand-over region loosened to level 0.7 the 50:50 average rises further to ~50% (docs 3.21). In progress: the supine floor policy retrained from scratch (`ppo_floor_s4b`).
 The status below (2026-10-17) is the previous state.
 
 ## Current status (2026-10-17)
