@@ -168,4 +168,4 @@ working.
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). `build_model.py`, `env.py`, `view.py` and `kakao_notify.py` are copies of files from the author's `fightai` project.
+MIT, see [`LICENSE`](LICENSE). `build_model.py`, `env.py`, `view.py` and `kakao_notify.py` are copies of files from the author's [`fightai`](https://github.com/SungyupKim/fightai) project.
