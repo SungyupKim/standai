@@ -5,6 +5,7 @@ evaluation seeds 0..399. Odd seeds sample the policy's actions (noise -> a wider
 Usage: make_strict_pool.py --ckpt FLOOR_CKPT --n 2000 --prone-frac 1.0 --first-seed 1000 --out ../checkpoints/pool_part.npz"""
 import argparse
 import os
+import time
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -23,10 +24,15 @@ a = p.parse_args()
 model = PPO.load(a.ckpt, device="cpu")
 env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, prone_frac=a.prone_frac, down_timeout=False)
 qpos, qvel, heads, tries, seed = [], [], [], 0, a.first_seed
+t0 = time.time()
 while len(qpos) < a.n and tries < a.n * 5:
     obs, _ = env.reset(seed=seed)
     stochastic = seed % 2 == 1 and not a.deterministic
     seed += 1; tries += 1
+    if tries % 200 == 0:
+        el = time.time() - t0
+        eta = el * (a.n - len(qpos)) / max(len(qpos), 1)
+        print(f"[progress] {len(qpos)}/{a.n} states from {tries} starts ({len(qpos) / tries:.0%}), {el / 60:.0f} min elapsed, ~{eta / 60:.0f} min left", flush=True)
     for _ in range(450):
         action, _ = model.predict(obs, deterministic=not stochastic)
         obs, _, term, trunc, info = env.step(action)

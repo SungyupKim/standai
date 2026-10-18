@@ -274,7 +274,9 @@ ARCHIVE_HEAD_HI = 1.10        # top rung: 'just stood up' (head past 0.9 m) -- t
 ARCHIVE_GAIN = 0.08           # frontier rule: only states >= this much above where THIS episode started are stored
 ARCHIVE_COOLDOWN = 10
 
-REPLAY_JITTER_RAD = 0.03       # joint jitter applied to replayed start states (failed-start replay)
+REPLAY_JITTER_RAD = float(_os.environ.get("STANDAI_REPLAY_JITTER", "0.03"))  # joint jitter applied to replayed start states (failed-start replay)
+REPLAY_VEL_JITTER = float(_os.environ.get("STANDAI_REPLAY_VEL_JITTER", "0"))  # N(0, this) added to every qvel of a replayed start (rad/s, m/s); 0 = off
+REPLAY_PITCH_JITTER = float(_os.environ.get("STANDAI_REPLAY_PITCH_JITTER", "0"))  # extra N(0, this) rad on the root pitch of a replayed start
 
 GETUP_SHIFT_SCALE = 1.0
 GETUP_SHIFT_REF = 0.5          # m of COM-to-feet horizontal offset at which the term reaches 0
@@ -382,6 +384,31 @@ class LocomotionEnv(Fighter2DEnv):
         # Instance attribute (not the bare module constant) so set_calm_frac() can anneal it
         # per-run via env_method, same pattern as the knee floor / velocity assist scaffolds.
         self._calm_frac = CALM_EPISODE_FRAC
+        # STANDAI_HARSH_MIN_TORSO=0.7: harsh starts whose torso begins below this height are redrawn (those are lying starts, the
+        # floor policies' job); 0 = off (default, every earlier run)
+        # STANDAI_START_VEL_POOL=<hand-off pool npz> + STANDAI_START_VEL_PROB=0.6: that share of non-replayed episodes starts with the root velocities
+        # forward velocity (x) of a random hand-off state added and N(0, STANDAI_START_VEL_JOINT) rad/s on the joint velocities. Measured 2026-10-17:
+        # calm starts already carry vz / pitch-rate as large as hand-off states (std 0.9 / 1.6 vs 0.5 / 1.0, from the free-fall settle) but have no forward drift
+        # (vx mean -0.07 vs +0.68 m/s) and half the joint speed (mean |v| 1.6 vs 3.6 rad/s). Unset = off (every earlier run).
+        self._start_vel_prob = float(_os.environ.get('STANDAI_START_VEL_PROB', '0') or 0)
+        self._start_vel_joint = float(_os.environ.get('STANDAI_START_VEL_JOINT', '3.5') or 0)
+        self._start_vel_root = None
+        if self._start_vel_prob > 0 and _os.environ.get('STANDAI_START_VEL_POOL'):
+            _qv = np.load(_os.environ['STANDAI_START_VEL_POOL'], allow_pickle=True)['qvel']
+            self._start_vel_root = _qv[:, self._a_root_x_dof].astype(np.float64)
+        # STANDAI_MIX_POOL=<hand-off pool npz> + STANDAI_MIX_PROB=0.4: that share of non-replayed episodes starts from a blend lam*s_i + (1-lam)*s_j
+        # (lam ~ U(STANDAI_MIX_LAM_LO, 1)) of two random hand-off states -- pose AND velocity, a_ joints only -- so the stand policy sees an endless variety of hand-off-like
+        # bodies instead of a fixed finite pool it can memorise. Unset = off.
+        self._mix_prob = float(_os.environ.get('STANDAI_MIX_PROB', '0') or 0)
+        self._mix_lam_lo = float(_os.environ.get('STANDAI_MIX_LAM_LO', '0.7'))   # lam ~ U(lo, 1): lo=0.2 blends away the hard tails (v37 catches 68% vs 48% real)
+        self._mix_pool = None
+        if self._mix_prob > 0 and _os.environ.get('STANDAI_MIX_POOL'):
+            _mp = np.load(_os.environ['STANDAI_MIX_POOL'], allow_pickle=True)
+            self._mix_pool = (_mp['qpos'].astype(np.float64), _mp['qvel'].astype(np.float64))
+            self._mix_idx = np.array([int(self.model.jnt_qposadr[j]) for j in range(self.model.njnt)
+                                      if (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, j) or '').startswith('a_')
+                                      and (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, j) or '') != 'a_root_x'])
+        self._harsh_min_torso = float(_os.environ.get('STANDAI_HARSH_MIN_TORSO', '0') or 0)
         self._replay_pool = []
         self._replay_frac = 0.0
         self._replayed = False
@@ -509,6 +536,14 @@ class LocomotionEnv(Fighter2DEnv):
         return severity
 
     def reset(self, seed=None, options=None):
+        out = self._reset_once(seed, options)
+        for _ in range(30):
+            if self._harsh_min_torso <= 0 or self._is_calm or self._replayed or self.data.xpos[self.a_torso_id][2] >= self._harsh_min_torso:
+                break
+            out = self._reset_once(None, options)
+        return out
+
+    def _reset_once(self, seed=None, options=None):
         obs, info = super().reset(seed=seed, options=options)
         self._gear_scale = 1.0 if self._gear_max <= 1.0 else float(self.np_random.uniform(1.0, self._gear_max))
         self.model.actuator_gear[self._gear_idx, 0] = self._gear_base[self._gear_idx] * self._gear_scale
@@ -557,6 +592,26 @@ class LocomotionEnv(Fighter2DEnv):
         if self.np_random.random() < push_prob:
             self.data.qvel[self._a_root_x_dof] += self.np_random.uniform(-2.5, 2.5)
 
+        if self._start_vel_root is not None and self.np_random.random() < self._start_vel_prob:
+            self.data.qvel[self._a_root_x_dof] += self._start_vel_root[int(self.np_random.integers(len(self._start_vel_root)))]
+            if self._start_vel_joint > 0:
+                for adr, _lo, _hi in self._a_hinge_limits:
+                    self.data.qvel[adr] += self.np_random.normal(0.0, self._start_vel_joint)
+        if self._mix_pool is not None and self.np_random.random() < self._mix_prob:
+            n = len(self._mix_pool[0])
+            i, j = int(self.np_random.integers(n)), int(self.np_random.integers(n))
+            lam = float(self.np_random.uniform(self._mix_lam_lo, 1.0))
+            q, v = self._mix_pool
+            self.data.qpos[self._mix_idx] = lam * q[i, self._mix_idx] + (1.0 - lam) * q[j, self._mix_idx]
+            self.data.qvel[:] = 0.0
+            self.data.qvel[self._mix_idx] = lam * v[i, self._mix_idx] + (1.0 - lam) * v[j, self._mix_idx]
+            self.data.qvel[self._a_root_x_dof] = lam * v[i, self._a_root_x_dof] + (1.0 - lam) * v[j, self._a_root_x_dof]
+            for adr, lo, hi in self._a_hinge_limits:
+                self.data.qpos[adr] = np.clip(self.data.qpos[adr] + self.np_random.normal(0.0, REPLAY_JITTER_RAD), lo, hi)
+            self._episode_knee_floor = None
+            self._is_calm = False
+            self._stand_streak = 0
+            mujoco.mj_forward(self.model, self.data)
         # failed-start replay (opt-in via set_replay_pool; empty pool = no behaviour change)
         self._replayed = False
         if self._replay_pool and self.np_random.random() < self._replay_frac:
@@ -593,6 +648,10 @@ class LocomotionEnv(Fighter2DEnv):
         # small joint jitter so the policy can't just memorise a handful of exact states
         for adr, lo, hi in self._a_hinge_limits:
             self.data.qpos[adr] = np.clip(self.data.qpos[adr] + self.np_random.normal(0.0, REPLAY_JITTER_RAD), lo, hi)
+        if REPLAY_VEL_JITTER > 0.0:
+            self.data.qvel[:] += self.np_random.normal(0.0, REPLAY_VEL_JITTER, size=self.data.qvel.shape)
+        if REPLAY_PITCH_JITTER > 0.0:
+            self.data.qpos[self.a_ry_qpos] += self.np_random.normal(0.0, REPLAY_PITCH_JITTER)
         self._episode_knee_floor = self._min_knee_deg if calm else None
         self._is_calm = calm
         self._stand_streak = 0

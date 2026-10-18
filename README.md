@@ -8,6 +8,13 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
+## Update 2026-10-18
+
+The stand policy is now `checkpoints/best_stand_v54.zip` (`v54` @20.3M): the controller (floor policy -> stand policy hand-over) stands after 20 s in **41%** of starts (50:50 supine/prone average, 200 seeds per side; the previous stand policy `v37`: 29%).
+The gain came from lowering the PPO learning rate (5e-5) on a stand run whose `approx_kl` was 0.09: the earlier runs were not improving, they were jumping by +-50 hand-off catches between checkpoints. The benchmark now prints each start side and a 50:50 average,
+because the environment's 80:20 supine/prone split of lying starts turned out to be an artefact of its collapse generator (docs/experiments_2026-10-11.md 3.20). In progress: the supine floor policy retrained from scratch (`ppo_floor_supine2`).
+The status below (2026-10-17) is the previous state.
+
 ## Current status (2026-10-17)
 
 The problem is split into **three policies** (the single stand policy never learned to get off the floor: 0/160 genuine uprights from starts below 0.6 m). The sign of the initial torso pitch (observable) picks the floor

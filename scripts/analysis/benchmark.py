@@ -4,7 +4,7 @@
 
 Sections (each runs in its own worker process, fixed seeds, deterministic actions, stand policy takes over at the strict stand-ready region):
   stand_catch   stand policy on the 300 held-out strict hand-off states (checkpoints/eval_strict_all.npz): genuinely upright / torso >= 0.7 m at the end
-                (baseline v37@96M: 127/300)
+                (v37@96M: 127/300, v54@20.3M: 141/300)
   stand_calm    stand policy from upright (calm) starts, 3 s gate, and the same split by initial knee bend (crouched starts are the weak spot)
   floor_supine  supine floor policy on supine-side starts only: reached the region / the stand policy then holds 3 s (never below 0.7 m)
   floor_prone   same for the prone policy on prone-side starts
@@ -24,7 +24,7 @@ sys.path.insert(0, ROOT + "scripts")
 DEFAULTS = dict(
     supine=ROOT + "checkpoints/autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip",
     prone=ROOT + "checkpoints/best_prone8.zip",
-    stand=ROOT + "checkpoints/autosave/ppo_stand_v37_ladder_20261011_212607_96000000_steps.zip",
+    stand=ROOT + "checkpoints/best_stand_v54.zip",   # v54 @20.3M (copy of the autosave); the old reference is ppo_stand_v37_ladder_..._96000000_steps.zip
 )
 EVAL_SET = ROOT + "checkpoints/eval_strict_all.npz"
 
@@ -38,7 +38,9 @@ def task_stand_catch(stand, q):
     _setup()
     from stand_progress_notify import handoff_catch
     up, end, n = handoff_catch(stand, EVAL_SET)
-    return dict(upright=up, torso_ok_at_end=end, n=n)
+    su, _, sn = handoff_catch(stand, ROOT + "checkpoints/eval_supine_strict.npz")
+    pu, _, pn = handoff_catch(stand, ROOT + "checkpoints/eval_prone_strict.npz")
+    return dict(upright=up, torso_ok_at_end=end, n=n, supine=[su, sn], prone=[pu, pn])
 
 
 def task_stand_calm(stand, n):
@@ -99,12 +101,13 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n):
+def task_controller(supine, prone, stand, n, side=None):
     _setup()
     import numpy as np
     from controller import GetUpController
     from floor_env import FloorEnv
-    env = FloorEnv(standready=True, level=1.0, crouch_frac=0.0, max_steps=10 ** 6, prone_frac=0.0, down_timeout=False)
+    env = FloorEnv(standready=True, level=1.0, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
+                   prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
     ctl = GetUpController(supine, prone, stand, fall_back=True)
     s10 = send = hand = 0
     T = 1000
@@ -145,6 +148,8 @@ def main():
             "floor_supine": ex.submit(task_floor, "supine", a.supine, a.stand, n_floor),
             "floor_prone": ex.submit(task_floor, "prone", a.prone, a.stand, n_floor),
             "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl),
+            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine"),
+            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone"),
         }
         res = {k: f.result() for k, f in futs.items()}
     res["checkpoints"] = {k: os.path.basename(getattr(a, k)) for k in DEFAULTS}
@@ -167,6 +172,17 @@ def main():
     t = res["controller"]
     print(f"rule-based controller, natural start mix ({t['n']}, 20 s): standing at 10 s {pct(t['standing_10s'], t['n'])}, at the end {pct(t['standing_end'], t['n'])}, "
           f"handed over {pct(t['handed_over'], t['n'])}   [baseline 24%]")
+    # start-side split: the env's natural lying-start mix is ~80% supine only because the collapse generator's hip target range is flexion-heavy
+    # (docs 3.19); the real fall direction mix is unknown, so also report each side alone and their 50:50 average
+    sc, pc = c["supine"], c["prone"]
+    print("-" * 110)
+    print("by start side (50:50 average is the number to compare across runs; the natural 80:20 mix above is a generator artefact):")
+    sh, ph = res["floor_supine"]["held"] / res["floor_supine"]["n"], res["floor_prone"]["held"] / res["floor_prone"]["n"]
+    cs, cp = res["controller_supine"], res["controller_prone"]
+    se, pe = cs["standing_end"] / cs["n"], cp["standing_end"] / cp["n"]
+    print(f"  stand catch of hand-off states : supine {sc[0]}/{sc[1]} ({sc[0] / sc[1]:.0%}) | prone {pc[0]}/{pc[1]} ({pc[0] / pc[1]:.0%}) | 50:50 {(sc[0] / sc[1] + pc[0] / pc[1]) / 2:.0%}")
+    print(f"  floor + stand holds 3 s        : supine {sh:.0%} | prone {ph:.0%} | 50:50 {(sh + ph) / 2:.0%}")
+    print(f"  controller, standing at 20 s   : supine {cs['standing_end']}/{cs['n']} ({se:.0%}) | prone {cp['standing_end']}/{cp['n']} ({pe:.0%}) | 50:50 {(se + pe) / 2:.0%}")
     print(f"({res['seconds']} s; saved to {out})")
 
 

@@ -79,7 +79,7 @@ def policy_alone_eval(ckpt_path, n=EVAL_N):
     return (succ / n, sum(p > 0.5 for p in peaks) / n, sum(p > 0.8 for p in peaks) / n, sum(peaks) / n)
 
 
-def standready_eval(ckpt_path, stand_ckpt, n=60, crouch_frac=0.4, max_steps=None, prone_frac=0.0, down_timeout=None, level=1.0, com_max=None):
+def standready_eval(ckpt_path, stand_ckpt, n=60, crouch_frac=0.4, max_steps=None, prone_frac=0.0, down_timeout=None, level=1.0, com_max=None, supine_frac=0.0):
     """v6: deterministic floor policy on the mixed start distribution (lying + crouched), fixed seeds 0..n-1. When it reaches
     the stand-ready region the stand policy takes over for 3 s (gate: torso never below 0.7 m). Returns per start kind
     {kind: [starts, reached, held_by_stand]}."""
@@ -89,7 +89,7 @@ def standready_eval(ckpt_path, stand_ckpt, n=60, crouch_frac=0.4, max_steps=None
     from floor_env import FloorEnv, SR_MAX_STEPS
     model = PPO.load(ckpt_path, device="cpu")
     stand = PPO.load(stand_ckpt, device="cpu") if stand_ckpt else None
-    env = FloorEnv(standready=True, crouch_frac=crouch_frac, max_steps=max_steps, prone_frac=prone_frac,
+    env = FloorEnv(standready=True, crouch_frac=crouch_frac, max_steps=max_steps, prone_frac=prone_frac, supine_frac=supine_frac,
                    down_timeout=down_timeout, level=level, com_max=com_max)
     out = {"lying": [0, 0, 0], "crouch": [0, 0, 0], "_pos": [0, 0, 0], "_neg": [0, 0, 0]}   # "_" rows: lying starts by pitch side
     for seed in range(n):
@@ -182,6 +182,7 @@ def main():
     parser.add_argument("--crouch-frac", type=float, default=0.4, help="share of crouched starts in --standready evaluation (0 = lying only)")
     parser.add_argument("--max-steps", type=int, default=None, help="episode length for the --standready evaluation (match the training run)")
     parser.add_argument("--prone-frac", type=float, default=0.0, help="share of lying evaluation starts forced to the start-pitch <= 0 side (1.0 = prone-only policy)")
+    parser.add_argument("--supine-frac", type=float, default=0.0, help="share of lying evaluation starts forced to the start-pitch > 0 side (1.0 = supine-only policy)")
     parser.add_argument("--com-max", type=float, default=None, help="evaluate with the COM-over-front-foot condition (match the training run)")
     parser.add_argument("--no-down-timeout", action="store_true", help="evaluate without env.py's 5 s 'stayed down' KO (match the training run)")
     parser.add_argument("--stand-ckpt", default=None, help="stand policy that takes over in --standready evaluation")
@@ -199,11 +200,11 @@ def main():
                 ckpt = latest_checkpoint(args.ckpt_glob)
                 if args.standready:
                     ev = standready_eval(ckpt, args.stand_ckpt, n=args.eval_n, crouch_frac=args.crouch_frac,
-                                          max_steps=args.max_steps, prone_frac=args.prone_frac,
+                                          max_steps=args.max_steps, prone_frac=args.prone_frac, supine_frac=args.supine_frac,
                                           down_timeout=not args.no_down_timeout, com_max=args.com_max) if ckpt else None
                     lvl = v.get("level", 1.0)
                     ev_lv = standready_eval(ckpt, args.stand_ckpt, n=args.eval_n, crouch_frac=args.crouch_frac,
-                                            max_steps=args.max_steps, prone_frac=args.prone_frac,
+                                            max_steps=args.max_steps, prone_frac=args.prone_frac, supine_frac=args.supine_frac,
                                             down_timeout=not args.no_down_timeout, level=lvl, com_max=args.com_max) if ckpt and lvl < 1.0 else None
                     msg = format_standready(v, args.total_timesteps, ev, ckpt, args.baseline_steps, ev_level=ev_lv)
                 else:

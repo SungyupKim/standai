@@ -359,3 +359,25 @@ owner of crouched starts, which the table shows to be its weak spot (23-43% belo
 **Compatibility check for retuning the stand policy:** the floor policies share only the body (gear), the 70-dim observation and the action semantics with the stand policy; rewards, exploration (std), pool share and curriculum are
 stand-training-only (`FloorEnv` discards the parent reward), so those can be retuned without touching the floor policies. Jerk/effort penalties are not part of the stand-only reward (the proposal to scale them with gear was moot).
 New options: `train_locomotion.py --no-knee-floor`, `train_floor.py --supine-frac` (supine-start-only floor training, not run yet), `scripts/controller.py` + `controller_eval.py`.
+
+## 9. Update 2026-10-18: a lower learning rate stabilises the stand policy (20 s standing 29% -> 41%); the 80:20 start split is an artefact
+
+**Instability, not degradation.** The from-scratch stand run `v53` (start distribution matched to the hand-off states: forward/joint velocity noise, 30% of starts blended from two hand-off states, no lying starts) had a hand-off catch that jumped
+by ~90 (of 600 held-out states) between checkpoints 1M steps apart (`v37` = 260): 277 at 10M, 291 at 20M, ~215 on average at 25-55M, 150-177 after 56M, while every training reward and the fall rate were flat after 20M.
+Cause: PPO at the default learning rate 3e-4 ran at `approx_kl` 0.08-0.1 and `clip_fraction` ~0.5 (healthy: 0.01-0.03 / 0.1-0.2). The stand trainer had no learning-rate option and had never been run with a reduced rate (only the floor policy `prone8` was).
+This is standard PPO practice, not a new finding; the project had simply missed it for the stand policy.
+
+**`v54`** = `v53` @10M continued at 5e-5 (`train_locomotion.py --learning-rate`): `approx_kl` 0.012-0.015, checkpoint-to-checkpoint jitter +-10 instead of +-50. Rolling controller, standing after 20 s (200 seeds per start side):
+
+| | supine start | prone start | 50:50 average |
+|---|---|---|---|
+| `v37` @96M (old stand policy) | 28% | 30% | 29% |
+| **`v54` @20.3M (new stand policy)** | 42% | 40% | **41%** |
+
+Same checkpoint family at 17M / 20.7M: 39% / 41%. Hand-off catch (150 states per side): supine 69% (v37 53%), prone 26% (v37 34%). Weaker than v37 on upright-start gate (46 vs 51/100) and prone catch. Baseline file: `checkpoints/best_stand_v54.zip`.
+
+**The 80:20 supine/prone split of the environment's lying starts is an artefact of the collapse generator**, not a modelled fall distribution: the hip target range is flexion-heavy (-20..+120 deg, targets drawn from 0.6x the range), so bodies fold backwards.
+Ablation: 80% supine as is, 91% without the root-pitch jitter, 52% with hip target 0, 47% with a symmetric hip target. The pitch-sign label matches the physical orientation in 100% of 1,500 starts. The benchmark now reports each side and a 50:50 average;
+the old "controller 24%" (80:20 weighted) is 28% / 30% per side for `v37`. The real fall direction mix is not known.
+
+Open: supine floor policy `ppo_floor_supine2` (from scratch, supine starts only, staged target, lr 1e-4) is training; floor reach (56% supine / 63% prone) has not moved in many experiments and is now the larger loss at 50:50 (40.5% of starts never reach the hand-off region vs 34.5% reach but are not held).

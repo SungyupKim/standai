@@ -753,6 +753,9 @@ def main():
                               "policy, e.g. a combat checkpoint) -- default: train from scratch")
     parser.add_argument("--save-freq", type=int, default=25_000)
     parser.add_argument("--ent-coef", type=float, default=None)
+    parser.add_argument("--learning-rate", type=float, default=None,
+                         help="override the (saved) PPO learning rate with a constant, e.g. 5e-5 when approx_kl / clip_fraction stay far above ~0.03 / 0.2")
+    parser.add_argument("--target-kl", type=float, default=None, help="PPO early-stops an update's epochs once approx_kl exceeds 1.5x this")
     parser.add_argument("--knee-already-relaxed", action="store_true",
                          help="skip the knee scaffold straight to its permanent floor from "
                               "step 0 (docs 10.44/10.45) -- pass this on any --init-from "
@@ -869,13 +872,23 @@ def main():
                                        "head_record": args.head_record})
 
     if args.init_from:
-        custom_objects = {"ent_coef": args.ent_coef} if args.ent_coef is not None else None
+        custom_objects = {"ent_coef": args.ent_coef} if args.ent_coef is not None else {}
+        if args.learning_rate is not None:
+            custom_objects["learning_rate"] = args.learning_rate
+            custom_objects["lr_schedule"] = lambda _progress, _lr=args.learning_rate: _lr
+        if args.target_kl is not None:
+            custom_objects["target_kl"] = args.target_kl
+        custom_objects = custom_objects or None
         model = PPO.load(args.init_from, env=vec_env, device=args.device, custom_objects=custom_objects)
         print(f"[locomotion] warm-starting from {args.init_from}", flush=True)
     else:
         kwargs = {}
         if args.ent_coef is not None:
             kwargs["ent_coef"] = args.ent_coef
+        if args.learning_rate is not None:
+            kwargs["learning_rate"] = args.learning_rate
+        if args.target_kl is not None:
+            kwargs["target_kl"] = args.target_kl
         model = PPO("MlpPolicy", vec_env, device=args.device, verbose=1, **kwargs)
         print("[locomotion] training from scratch", flush=True)
 

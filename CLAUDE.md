@@ -11,7 +11,15 @@ Check before assuming anything is idle or stale:
 ```bash
 pgrep -af "train_locomotion.py|stand_progress_notify.py|watch_locomotion.py|train_floor.py|floor_progress_notify.py|watch_floor.py"
 ```
-**State of play (2026-10-17):** three policies + a rule-based controller (details: `README.md` status table, `docs/experiments_2026-10-11.md` 3.17 and 3.18, `docs/TECHNICAL_SUMMARY.md` 6 and 7).
+**State of play (2026-10-18) -- supersedes the 2026-10-17 block below where they conflict** (details: `docs/experiments_2026-10-11.md` 3.20, `docs/TECHNICAL_SUMMARY.md` 9):
+- **Stand policy to use: `checkpoints/best_stand_v54.zip`** (= `v54` @20.3M, a copy of `autosave/ppo_stand_v54_lowlr_..._20300000_steps.zip`). Controller 20 s standing 41% (50:50 supine/prone) vs `v37` 29%. `v37`@96M is the old reference (pass it with `--stand`).
+- Why it works: the stand trainer ran at the default lr 3e-4 with `approx_kl` ~0.09 and its hand-off catch jumped +-50 between checkpoints; `train_locomotion.py --learning-rate 5e-5` (new, also `--target-kl`) fixed that. Healthy: `approx_kl` 0.01-0.03.
+- Start distribution env vars (all opt-in, default off): `STANDAI_HARSH_MIN_TORSO=0.7` (no lying harsh starts), `STANDAI_START_VEL_POOL/PROB/JOINT` (hand-off-like forward + joint velocity), `STANDAI_MIX_POOL/PROB/LAM_LO` (starts blended from two hand-off states; blends are easier than real hand-offs and mix supine with prone -- same-type blending is not done yet), `STANDAI_REPLAY_JITTER/VEL_JITTER/PITCH_JITTER`. v54's full command is in docs 3.20.
+- **Always judge with `scripts/analysis/benchmark.py` (per side + 50:50 average).** The 80:20 supine/prone split of lying starts is an artefact of the collapse generator (hip target range), not a real fall distribution. Pick checkpoints by adjacent-checkpoint jitter and an independent eval set (`checkpoints/eval2_all.npz`, seeds 400+), not by one measurement.
+- Running: `ppo_floor_supine2` (supine floor policy from scratch, `--supine-frac 1.0 --level-start 0.0`, lr 1e-4; log `checkpoints/floor_train_supine2.log`, notifier `floor_progress_notify_supine2.log`). Paused (SIGSTOP): v46 (PIDs 288630..), v49 (PIDs 330512..). `ps -o pid,etime,cmd -C python` before launching anything.
+- Hand-off pool for training/analysis: `checkpoints/pool_big_all.npz` (32,000 states, 16,000 supine + 16,000 prone, seeds 100000+). Eval sets: `eval_strict_all.npz` (300) and `eval2_all.npz` (300), each 150 supine + 150 prone.
+
+**State of play (2026-10-17, previous):** three policies + a rule-based controller (details: `README.md` status table, `docs/experiments_2026-10-11.md` 3.17 and 3.18, `docs/TECHNICAL_SUMMARY.md` 6 and 7).
 - Supine floor policy `ppo_floor_v12` (`autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip`), prone floor policy `ppo_floor_prone8` (`checkpoints/best_prone8.zip` = 86.5M; 77.45M / 82M / 84.25M / 97.8M are statistically the same).
 - Stand policy: **`v37`@96M is the one to use** (127/300 of the strict hand-off evaluation set `checkpoints/eval_strict_all.npz`, calm gate ~50). `v38`, `v47` (hand-off pool fine-tuning) and `v39`-`v45` (from scratch) all FAILED to improve it
   (docs 3.18). Pool for training: `checkpoints/pool_strict_all.npz` (8,000 states, `scripts/make_strict_pool.py`).
