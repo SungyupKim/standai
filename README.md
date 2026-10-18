@@ -8,9 +8,16 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
+> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 50%** of starts
+>
+> Rule-based controller (floor policy -> stand policy hand-over) with `ppo_floor_v12` / `ppo_floor_prone8` / `checkpoints/best_stand_v54.zip`, hand-over region level 0.7:
+> **50%** standing after 20 s (supine start 46%, prone start 53%, 200 seeds each; 41% with the strict hand-over region). At the start of the project this was **0/160**.
+> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); the numbers come from seeds that were also used
+> to make decisions, so a final check on untouched seeds is still to do. Reproduce: `.venv/bin/python scripts/analysis/benchmark.py` (~5 min).
+
 ## Update 2026-10-18
 
-The stand policy is now `checkpoints/best_stand_v54.zip` (`v54` @20.3M): the controller (floor policy -> stand policy hand-over) stands after 20 s in **41%** of starts (50:50 supine/prone average, 200 seeds per side; the previous stand policy `v37`: 29%).
+The stand policy is now `checkpoints/best_stand_v54.zip` (`v54` @20.3M): the controller (floor policy -> stand policy hand-over) stands after 20 s in **41%** of starts at the strict hand-over region (**50%** at level 0.7, see the result above; 50:50 supine/prone average, 200 seeds per side; the previous stand policy `v37`: 29%).
 The gain came from lowering the PPO learning rate (5e-5) on a stand run whose `approx_kl` was 0.09: the earlier runs were not improving, they were jumping by +-50 hand-off catches between checkpoints. The benchmark now prints each start side and a 50:50 average,
 because the environment's 80:20 supine/prone split of lying starts turned out to be an artefact of its collapse generator (docs/experiments_2026-10-11.md 3.20). With the controller's hand-over region loosened to level 0.7 the 50:50 average rises further to ~50% (docs 3.21). In progress: the supine floor policy retrained from scratch (`ppo_floor_s4b`).
 The status below (2026-10-17) is the previous state.
