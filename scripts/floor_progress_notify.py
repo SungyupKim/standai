@@ -88,7 +88,8 @@ def standready_eval(ckpt_path, stand_ckpt, n=60, crouch_frac=0.4, max_steps=None
     from env import FALL_HEIGHT
     from floor_env import FloorEnv, SR_MAX_STEPS
     model = PPO.load(ckpt_path, device="cpu")
-    stand = PPO.load(stand_ckpt, device="cpu") if stand_ckpt else None
+    from sym import load_stand
+    stand = load_stand(stand_ckpt) if stand_ckpt else None
     env = FloorEnv(standready=True, crouch_frac=crouch_frac, max_steps=max_steps, prone_frac=prone_frac, supine_frac=supine_frac,
                    down_timeout=down_timeout, level=level, com_max=com_max)
     out = {"lying": [0, 0, 0], "crouch": [0, 0, 0], "_pos": [0, 0, 0], "_neg": [0, 0, 0]}   # "_" rows: lying starts by pitch side

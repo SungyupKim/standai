@@ -52,6 +52,16 @@ SR_MAX_PITCH_RATE = 100.0      # deg/s
 # Why: prone floor policies (prone1-3, 40M steps) reached torso ~0.93 m (median) but the strict region (1.08 m, knees > -20, pitch < 20,
 # slow) was met 0-1 times in 100, so there was no success bonus to learn from.
 SR_LOOSE = dict(torso=0.75, knee_bend=110.0, pitch=45.0, vz=2.5, pr=400.0, com=0.30)   # torso was 0.85 in prone4/5/6 (warm starts); 0.75 for a from-scratch run
+# Feet-gap condition (OPT-IN: STANDAI_FEET_GAP=<strict gap in m, e.g. 0.15> in the environment of every process that builds the FloorEnv: trainer,
+# benchmark, pool builder, notifier). Without it the region only needs ONE foot down, and both v12 and the 2026-10-18 re-trained supine policy hand over
+# standing on one leg with the other leg raised to hip height (hip 120 deg, knee straight, feet 1.2 m apart in height); the stand policy then catches 73% of v12's
+# hand-offs but only 8% when left and right are swapped, and 4% of the new policy's (mirror image) -- docs 3.22. With the condition the region needs |z_foot_r - z_foot_l|
+# <= gap, linear in the level from SR_FEET_GAP_LOOSE (level 0, effectively off) to the strict value (level 1); the dense stand-ready term is also scaled by exp(-(gap/0.5)^2).
+SR_FEET_GAP_LOOSE = 1.6
+# Stand-policy value bonus (OPT-IN: STANDAI_STAND_VALUE_CKPT=<stand policy zip> + STANDAI_STAND_VALUE_COEF=<k>, standready only): while the foot is down and the torso is at
+# least 0.9 m, the floor policy gets an extra k * clip((V_stand(obs) - LO) / (HI - LO), 0, 1) per step, V_stand being the critic of the stand policy that will take over
+# (LO / HI = STANDAI_STAND_VALUE_LO / _HI, default 500 / 2500: on prone hand-offs V is 926 for the states v54 misses and 1972 for the ones it catches, AUC 0.95 -- docs 3.22).
+# It is only an auxiliary term: the head record / height terms and the hand-off bonus stay the main reward. Process-wide model, so set it only for the trainer, not the notifier.
 SR_BONUS = 20.0
 SR_DENSE_SCALE = 0.05          # per-step: torso height x knee extension
 SR_SETTLE_SCALE = 0.03
@@ -79,6 +89,23 @@ class FloorEnv(LocomotionEnv):
         # optional stand-ready condition: centre of mass x minus the FRONT foot x <= com_max (m). Hand-off states the stand policy
         # does not hold have the COM ~10 cm ahead of the front foot, held ones ~2 cm (AUC 0.26, 163 prone hand-offs of v4 @41M).
         self._com_max = com_max
+        _fg = os.environ.get("STANDAI_FEET_GAP")
+        self._feet_gap = float(_fg) if _fg else None
+        self._sv_coef = float(os.environ.get("STANDAI_STAND_VALUE_COEF", "0") or 0)
+        self._sv_model = None
+        self._sv_bonus = float(os.environ.get("STANDAI_STAND_VALUE_BONUS", "10"))   # extra hand-off bonus * V_norm at the success step (success bonus itself is 20)
+        if self._sv_coef > 0.0:
+            import torch
+            from stable_baselines3 import PPO
+            torch.set_num_threads(1)
+            self._sv_torch = torch
+            self._sv_model = PPO.load(os.environ["STANDAI_STAND_VALUE_CKPT"], device="cpu")
+            self._sv_sym = os.environ.get("STANDAI_STAND_VALUE_SYM") == "1"      # value of the better of the two left-right copies (scripts/sym.py)
+            if self._sv_sym:
+                from sym import SymPolicy
+                self._sv_symp = SymPolicy(self._sv_model)
+            self._sv_lo = float(os.environ.get("STANDAI_STAND_VALUE_LO", "500"))
+            self._sv_hi = float(os.environ.get("STANDAI_STAND_VALUE_HI", "2500"))
         self._root_body = int(self.model.body_rootid[self.a_torso_id])
         # env.py ends an episode as a KO once the torso has stayed below FALL_HEIGHT for DOWN_RECOVERY_STEPS (250 = 5 s)
         # in a row; a floor policy that is still on the floor at 5 s therefore never sees the 450-step limit. down_timeout=False
@@ -126,6 +153,13 @@ class FloorEnv(LocomotionEnv):
         mix = lambda loose, strict: loose + a * (strict - loose)
         return (mix(lo["torso"], SR_TORSO_Z), mix(lo["knee_bend"], SR_MAX_KNEE_BEND_DEG), mix(lo["pitch"], SR_MAX_PITCH_DEG),
                 mix(lo["vz"], SR_MAX_VZ), mix(lo["pr"], SR_MAX_PITCH_RATE))
+
+    def _feet_gap_now(self):
+        """|z_foot_r - z_foot_l| (m) and its limit at the current level (None = condition off)."""
+        fz = [float(self.data.site_xpos[sid][2]) for sid in self.a_feet]
+        gap = abs(fz[0] - fz[1])
+        lim = None if self._feet_gap is None else SR_FEET_GAP_LOOSE + self._level * (self._feet_gap - SR_FEET_GAP_LOOSE)
+        return gap, lim
 
     def _com_limit(self):
         """COM-ahead limit at the current level: SR_LOOSE['com'] at level 0 -> com_max at level 1 (None = condition off)."""
@@ -184,6 +218,9 @@ class FloorEnv(LocomotionEnv):
         sr_dense = 0.0
         speed_pen = 0.0
         air_pen = 0.0
+        sv = 0.0
+        v_norm = 0.0
+        feet_gap, gap_lim = self._feet_gap_now()
         if self._standready:
             vz = float(self.data.qvel[self.a_z_dof])
             pr = float(np.degrees(self.data.qvel[self._ry_dof]))
@@ -191,9 +228,21 @@ class FloorEnv(LocomotionEnv):
             t_z, t_knee, t_pitch, t_vz, t_pr = self._sr_thresholds()
             in_pose = bool(foot_down and torso >= t_z and knee >= -t_knee
                            and abs(pitch) < np.deg2rad(t_pitch) and abs(vz) < t_vz and abs(pr) < t_pr
-                           and (self._com_max is None or self._com_ahead() <= self._com_limit()))
+                           and (self._com_max is None or self._com_ahead() <= self._com_limit())
+                           and (gap_lim is None or feet_gap <= gap_lim))
             ext = min(1.0, max(0.0, 1.0 + knee / 60.0))              # 1 at straight knees, 0 at -60 deg or more bent
             sr_dense = SR_DENSE_SCALE * min(1.0, max(0.0, (torso - 0.6) / 0.5)) * ext * foot_down
+            if gap_lim is not None:
+                sr_dense *= float(np.exp(-(feet_gap / 0.5) ** 2))
+            if self._sv_model is not None and foot_down and torso >= 0.7:
+                if self._sv_sym:
+                    v_stand = self._sv_symp.value(obs)
+                else:
+                    with self._sv_torch.no_grad():
+                        v_stand = float(self._sv_model.policy.predict_values(self._sv_torch.as_tensor(obs[None], dtype=self._sv_torch.float32))[0, 0])
+                v_norm = min(1.0, max(0.0, (v_stand - self._sv_lo) / (self._sv_hi - self._sv_lo)))
+                # ramp with the head height: no weight below 0.9 m (V of a low, lying-ish state is a poor guess), full weight from 1.3 m (the hand-off height)
+                sv = self._sv_coef * min(1.0, max(0.0, (head - 0.9) / 0.4)) * v_norm
             if self._speed_pen > 0.0:
                 h_w = min(1.0, max(0.0, (torso - SP_H_LO) / (SP_H_HI - SP_H_LO)))
                 speed_pen = self._speed_pen * h_w * (self._speed_vz_w * abs(vz) / SR_MAX_VZ + abs(pr) / SR_MAX_PITCH_RATE)
@@ -210,12 +259,16 @@ class FloorEnv(LocomotionEnv):
             if foot_down and head >= 0.8 * HANDOFF_HEAD_Z and torso >= HOLD_TORSO_Z:
                 settle = SETTLE_SCALE * float(np.exp(-(vz / SETTLED_MAX_VZ) ** 2 - (pr / SETTLED_MAX_PITCH_RATE) ** 2))
         else:
+            # v4-type "reach" target (non-standready); with STANDAI_FEET_GAP the same level curriculum tightens a feet-height-gap limit here too
             in_pose = bool(foot_down and head >= HANDOFF_HEAD_Z and torso >= HOLD_TORSO_Z
-                           and abs(pitch) < np.deg2rad(HANDOFF_MAX_PITCH_DEG))
+                           and abs(pitch) < np.deg2rad(HANDOFF_MAX_PITCH_DEG)
+                           and (gap_lim is None or feet_gap <= gap_lim))
         self._hold = self._hold + 1 if in_pose else 0
         success = self._hold >= (SETTLED_HOLD_STEPS if self._settled and not self._standready else HOLD_STEPS)
         bonus = (SR_BONUS if self._standready else SUCCESS_BONUS) if success else 0.0
-        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen
+        if success and self._sv_model is not None:       # the arrival state is what the stand policy will have to hold: reward the ones it values
+            sv += self._sv_bonus * v_norm
+        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen + sv
 
         info["reward_breakdown"] = {"head_record": record, "ground_height": dense}
         if self._settled or self._standready:
@@ -224,6 +277,7 @@ class FloorEnv(LocomotionEnv):
             info["reward_breakdown"]["standready_dense"] = sr_dense
             info["reward_breakdown"]["speed_pen"] = -speed_pen
             info["reward_breakdown"]["air_pen"] = -air_pen
+            info["reward_breakdown"]["stand_value"] = sv
         if success:
             terminated = True
             info["handoff_state"] = (self.data.qpos.copy(), self.data.qvel.copy(), head)

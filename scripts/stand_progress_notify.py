@@ -138,7 +138,8 @@ def handoff_catch(ckpt_path, npz_path):
 
     from locomotion_env import LocomotionEnv
 
-    model = PPO.load(ckpt_path, device="cpu")
+    from sym import load_stand
+    model = load_stand(ckpt_path)
     d = np.load(npz_path, allow_pickle=True)
     env = LocomotionEnv(stand_only=True)
     up = caught = 0

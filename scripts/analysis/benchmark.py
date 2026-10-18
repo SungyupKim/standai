@@ -76,7 +76,8 @@ def task_floor(side, floor, stand, n):
     from stable_baselines3 import PPO
     from env import FALL_HEIGHT
     from floor_env import FloorEnv
-    fl, st = PPO.load(floor, device="cpu"), PPO.load(stand, device="cpu")
+    from sym import load_stand
+    fl, st = PPO.load(floor, device="cpu"), load_stand(stand)
     env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
     reached = held = 0
