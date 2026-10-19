@@ -8,11 +8,11 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 60%** of starts
+> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 62%** of starts
 >
 > Rule-based controller with three learned policies (floor policy -> hand-over policy (prone side) -> stand policy): `ppo_floor_v12` / `ppo_floor_prone8` / `checkpoints/best_handover_prone.zip` / `checkpoints/best_stand_v55b.zip`, hand-over region level 0.7:
-> **61%** standing after 20 s on untouched seeds (supine start 48%, prone start 74%, 100 seeds each; 57.5% on an earlier seed set; **~50%** without the hand-over policy). At the start of the project this was **0/160**.
-> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); 100 seeds per side (+-5 points). The supine side (48%) is limited by the floor policy (30% of starts never reach the hand-over region). Reproduce: `.venv/bin/python -I scripts/analysis/funnel.py --ho-prone checkpoints/best_handover_prone.zip --seed0 9000` (~5 min).
+> **62.5%** standing after 20 s on seeds never used for any decision (supine start 49%, prone start 76%, 200 seeds each; the same seeds without the hand-over policy: 54.8%, with the previous stand policy and no hand-over policy: 47.8%). At the start of the project this was **0/160**.
+> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); 200 seeds per side (+-3.5 points). The supine side (49%) is limited by the floor policy (26% of starts never reach the hand-over region; the rest often arrive leaning back, unrecoverable, docs 3.24). Reproduce: `STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/funnel.py --ho-prone checkpoints/best_handover_prone.zip --n 200 --seed0 13000` (~8 min).
 
 ## Update 2026-10-18
 

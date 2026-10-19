@@ -30,7 +30,7 @@ from sym import load_stand
 
 
 class GetUpController:
-    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",)):
+    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",), v_gate=None, v_wait=50):
         self.supine = PPO.load(supine_ckpt, device="cpu")
         self.prone = PPO.load(prone_ckpt, device="cpu")
         self.stand = load_stand(stand_ckpt)      # STANDAI_SYM_STAND=1 -> left-right symmetrised (scripts/sym.py)
@@ -38,6 +38,10 @@ class GetUpController:
         self.handover = PPO.load(handover_ckpt, device="cpu") if handover_ckpt else None   # optional hand-over policy between floor and stand
         self.handover_max = handover_max
         self.handover_sides = tuple(handover_sides)     # which floor policy's arrivals go through the hand-over policy (it was trained on prone hand-offs)
+        self.v_gate, self.v_wait = v_gate, v_wait          # hand over only when the hand-over policy's critic V(s) >= v_gate (or after v_wait steps of waiting)
+        self._arrived = False
+        self._arrive_wait = 0
+        self.v_forced = 0
         self._ho_steps = 0
         self._ho_hold = 0
         self.ho_success = 0
@@ -65,6 +69,7 @@ class GetUpController:
         self.mode, self.handovers, self.falls = "floor", 0, 0
         self._waited, self.forced = 0, 0
         self._ho_steps = self._ho_hold = self.ho_success = self.ho_fail = 0
+        self._arrived, self._arrive_wait, self.v_forced = False, 0, 0
         self._select_floor(env)
 
     @staticmethod
@@ -88,7 +93,21 @@ class GetUpController:
             return True
         return False
 
+    def _handover_value(self, obs):
+        import torch
+        with torch.no_grad():
+            return float(self.handover.policy.predict_values(torch.as_tensor(obs[None], dtype=torch.float32))[0, 0])
+
     def act(self, obs, env=None):
+        if self.mode == "floor" and self._arrived:
+            self._arrive_wait += 1
+            if self._handover_value(obs) >= self.v_gate or self._arrive_wait >= self.v_wait:
+                if self._arrive_wait >= self.v_wait:
+                    self.v_forced += 1
+                self.mode = "handover"
+                self.handovers += 1
+                self._arrived = False
+                self._ho_steps = self._ho_hold = 0
         policy = self.stand if self.mode == "stand" else (self.handover if self.mode == "handover" else self.floor)
         action, _ = policy.predict(obs, deterministic=True)
         return action
@@ -97,7 +116,13 @@ class GetUpController:
         """Call after env.step with the info it returned; updates the mode."""
         z = float(env.data.xpos[env.a_torso_id][2])
         if self.mode == "floor":
-            if info.get("floor_success") and self._may_hand_over(env):
+            use_ho = self.handover is not None and self.floor_name in self.handover_sides
+            self._arrived = bool(use_ho and self.v_gate is not None and info.get("floor_success"))
+            if not self._arrived:
+                self._arrive_wait = 0
+            if self._arrived:
+                pass                                    # act() decides with the critic
+            elif info.get("floor_success") and self._may_hand_over(env):
                 self.mode = "handover" if (self.handover is not None and self.floor_name in self.handover_sides) else "stand"
                 self.handovers += 1
                 self._waited = 0

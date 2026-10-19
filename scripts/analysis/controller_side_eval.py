@@ -10,6 +10,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--stand", default=ROOT + "checkpoints/best_stand_v55b.zip")
 ap.add_argument("--supine", default=B.DEFAULTS["supine"]); ap.add_argument("--prone", default=B.DEFAULTS["prone"])
 ap.add_argument("--handover", nargs="*", default=[None], help="several checkpoints compare side by side ('none' = no hand-over policy)")
+ap.add_argument("--v-gates", type=float, nargs="*", default=[None], help="hand-over critic gates to compare (omit = no gate)")
 ap.add_argument("--n", type=int, default=100); ap.add_argument("--seed0", type=int, default=0)
 ap.add_argument("--levels", type=float, nargs="*", default=[0.7]); ap.add_argument("--sides", nargs="*", default=["supine", "prone"]); ap.add_argument("--workers", type=int, default=8)
 a = ap.parse_args()
@@ -19,7 +20,8 @@ with ProcessPoolExecutor(max_workers=a.workers) as ex:
         h = None if h in (None, "none") else h
         for side in a.sides:
             for lv in a.levels:
-                futs[(h, side, lv)] = ex.submit(B.task_controller, a.supine, a.prone, a.stand, a.n, side, lv, h, a.seed0)
-    for (h, side, lv), f in futs.items():
+                for vg in a.v_gates:
+                    futs[(h, side, lv, vg)] = ex.submit(B.task_controller, a.supine, a.prone, a.stand, a.n, side, lv, h, a.seed0, vg)
+    for (h, side, lv, vg), f in futs.items():
         r = f.result()
-        print(f"hand-over {os.path.basename(h) if h else 'none':45s} {side:6s} level {lv}: standing at 20 s {r['standing_end']}/{r['n']}  (10 s {r['standing_10s']}, handed over {r['handed_over']})", flush=True)
+        print(f"hand-over {os.path.basename(h) if h else 'none':45s} {side:6s} level {lv} v_gate {vg}: standing at 20 s {r['standing_end']}/{r['n']}  (10 s {r['standing_10s']}, handed over {r['handed_over']})", flush=True)

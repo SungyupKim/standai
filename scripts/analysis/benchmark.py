@@ -105,14 +105,14 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None):
+def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None, v_gate=None):
     _setup()
     import numpy as np
     from controller import GetUpController
     from floor_env import FloorEnv
     env = FloorEnv(standready=True, level=level, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
-    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",))
+    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",), v_gate=v_gate)
     s10 = send = hand = 0
     T = 1000
     s0 = SEED0 if seed0 is None else seed0
