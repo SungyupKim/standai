@@ -8,12 +8,11 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 50%** of starts
+> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 60%** of starts
 >
-> Rule-based controller (floor policy -> stand policy hand-over) with `ppo_floor_v12` / `ppo_floor_prone8` / `checkpoints/best_stand_v54.zip`, hand-over region level 0.7:
-> **50%** standing after 20 s (supine start 46%, prone start 53%, 200 seeds each; 41% with the strict hand-over region). At the start of the project this was **0/160**.
-> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); the numbers come from seeds that were also used
-> to make decisions, so a final check on untouched seeds is still to do. Reproduce: `.venv/bin/python scripts/analysis/benchmark.py` (~5 min).
+> Rule-based controller with three learned policies (floor policy -> hand-over policy (prone side) -> stand policy): `ppo_floor_v12` / `ppo_floor_prone8` / `checkpoints/best_handover_prone.zip` / `checkpoints/best_stand_v55b.zip`, hand-over region level 0.7:
+> **61%** standing after 20 s on untouched seeds (supine start 48%, prone start 74%, 100 seeds each; 57.5% on an earlier seed set; **~50%** without the hand-over policy). At the start of the project this was **0/160**.
+> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); 100 seeds per side (+-5 points). The supine side (48%) is limited by the floor policy (30% of starts never reach the hand-over region). Reproduce: `.venv/bin/python -I scripts/analysis/funnel.py --ho-prone checkpoints/best_handover_prone.zip --seed0 9000` (~5 min).
 
 ## Update 2026-10-18
 

@@ -9,6 +9,8 @@ Rules (all parameters are plain constructor arguments so a measurement can sweep
               of the FRONT foot, keep the floor policy for up to `wait_steps` more steps and hand over as soon as it is behind the gate (or when the wait is
               over). The stand policy catches 84% of prone hand-offs with COM - front foot < -0.05 m and 0% above +0.15 m (docs 3.22). One-leg-raised
               hand-overs (v12) are not gated: the relation is reversed there.
+  2c. HAND-OVER POLICY (optional, handover_ckpt=...) floor -> hand-over policy (scripts/handover_env.py: moves the body into a state the stand policy holds) -> stand
+              when its success condition has held for HOLD_STEPS steps (falls back to the floor policy if the torso drops below FAIL_TORSO, time-out -> stand).
   3. FALL BACK (optional) if the torso drops below FALL_HEIGHT while the stand policy is in control, the floor policy is re-selected by pitch sign.
               (Measured 2026-10-15: gives no gain over never going back - 24% vs 26% standing at 20 s - but no harm either.)
 
@@ -28,11 +30,18 @@ from sym import load_stand
 
 
 class GetUpController:
-    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25):
+    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",)):
         self.supine = PPO.load(supine_ckpt, device="cpu")
         self.prone = PPO.load(prone_ckpt, device="cpu")
         self.stand = load_stand(stand_ckpt)      # STANDAI_SYM_STAND=1 -> left-right symmetrised (scripts/sym.py)
         self.fall_back = fall_back
+        self.handover = PPO.load(handover_ckpt, device="cpu") if handover_ckpt else None   # optional hand-over policy between floor and stand
+        self.handover_max = handover_max
+        self.handover_sides = tuple(handover_sides)     # which floor policy's arrivals go through the hand-over policy (it was trained on prone hand-offs)
+        self._ho_steps = 0
+        self._ho_hold = 0
+        self.ho_success = 0
+        self.ho_fail = 0
         self.mode = "floor"
         self.floor = self.supine
         self.floor_name = "supine"
@@ -55,6 +64,7 @@ class GetUpController:
     def reset(self, env):
         self.mode, self.handovers, self.falls = "floor", 0, 0
         self._waited, self.forced = 0, 0
+        self._ho_steps = self._ho_hold = self.ho_success = self.ho_fail = 0
         self._select_floor(env)
 
     @staticmethod
@@ -79,7 +89,7 @@ class GetUpController:
         return False
 
     def act(self, obs, env=None):
-        policy = self.stand if self.mode == "stand" else self.floor
+        policy = self.stand if self.mode == "stand" else (self.handover if self.mode == "handover" else self.floor)
         action, _ = policy.predict(obs, deterministic=True)
         return action
 
@@ -88,11 +98,22 @@ class GetUpController:
         z = float(env.data.xpos[env.a_torso_id][2])
         if self.mode == "floor":
             if info.get("floor_success") and self._may_hand_over(env):
-                self.mode = "stand"
+                self.mode = "handover" if (self.handover is not None and self.floor_name in self.handover_sides) else "stand"
                 self.handovers += 1
                 self._waited = 0
+                self._ho_steps = self._ho_hold = 0
             elif z < FALL_HEIGHT:
                 self._select_floor(env)        # re-pick by the current pitch sign while the body is down
+        elif self.mode == "handover":
+            from handover_env import FAIL_TORSO, HOLD_STEPS, ok_state
+            self._ho_steps += 1
+            self._ho_hold = self._ho_hold + 1 if ok_state(env) else 0
+            if self._ho_hold >= HOLD_STEPS:
+                self.mode = "stand"; self.ho_success += 1
+            elif z < FAIL_TORSO:
+                self.mode = "floor"; self.ho_fail += 1; self._select_floor(env)
+            elif self._ho_steps >= self.handover_max:
+                self.mode = "stand"          # time out: let the stand policy try anyway
         elif z < FALL_HEIGHT:
             self.falls += 1
             if self.fall_back:

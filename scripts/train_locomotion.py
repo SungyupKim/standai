@@ -734,8 +734,9 @@ class ComLadderPoolCallback(HandoffPoolCallback):
 
     MIRROR_PAIRS = [(9, 13), (10, 14), (11, 15), (5, 7), (6, 8)]
 
-    def __init__(self, path, frac=0.4, first_index=0, start_frac=0.3, gate=0.35, every=500_000, step=0.1, mirror=True, n_probe=100):
+    def __init__(self, path, frac=0.4, first_index=0, start_frac=0.3, gate=0.35, every=500_000, step=0.1, mirror=True, n_probe=100, last_index=None, grounded=False):
         super().__init__(path, frac=frac)
+        self.last_index, self.grounded = last_index, grounded      # grounded: COM-ahead against the front GROUNDED foot (a raised leg is no support)
         self.first_index, self.start_frac, self.gate, self.every, self.step = first_index, start_frac, gate, every, step
         self.mirror, self.n_probe = mirror, n_probe
         self._level, self._n_allowed, self._probe_pass = 0.0, 0, None
@@ -763,7 +764,7 @@ class ComLadderPoolCallback(HandoffPoolCallback):
         import mujoco
         from locomotion_env import LocomotionEnv
         d = np.load(self.path, allow_pickle=True)
-        Q, V = d["qpos"][self.first_index:], d["qvel"][self.first_index:]
+        Q, V = d["qpos"][self.first_index:self.last_index], d["qvel"][self.first_index:self.last_index]
         env = LocomotionEnv(stand_only=True)
         ahead = np.zeros(len(Q))
         for i, (q, v) in enumerate(zip(Q, V)):
@@ -771,7 +772,11 @@ class ComLadderPoolCallback(HandoffPoolCallback):
             env.data.qpos[:], env.data.qvel[:] = q, v
             mujoco.mj_forward(env.model, env.data)
             com_x = np.sum(env._a_masses * env.data.xipos[env._a_bodies, 0]) / env._a_masses.sum()
-            ahead[i] = com_x - max(env.data.site_xpos[s][0] for s in env.a_feet)
+            if self.grounded:
+                from handover_env import com_state
+                ahead[i] = com_state(env)[0] - com_state(env)[1]
+            else:
+                ahead[i] = com_x - max(env.data.site_xpos[s][0] for s in env.a_feet)
         order = np.argsort(ahead)
         self._sorted = [(Q[i], V[i]) for i in order]
         self._ahead_sorted = ahead[order]

@@ -3,7 +3,7 @@ Per seed: peak torso height, best number of stand-ready conditions (of 6) met at
 at the highest-torso step, and the start pitch sign (face up/down mapping unverified).
 Classes of misses: A never rose (peak torso < 0.7 m), B rose partway (0.7-1.08 m), C reached 1.08 m but never all 6 conditions;
 within C: near miss = 5/6 conditions at some step in the last 100 steps.
-Usage: floor_miss_classify.py <floor_ckpt> [n] [max_steps] [prone_frac]"""
+Usage: floor_miss_classify.py <floor_ckpt> [n] [max_steps] [prone_frac] [supine_frac] [level]"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,7 +18,9 @@ max_steps = int(sys.argv[3]) if len(sys.argv) > 3 else 450
 NAMES = ["foot", "torso>=1.08", "knee", "pitch<20", "|vz|<1", "|pr|<100"]
 model = PPO.load(ckpt, device="cpu")
 prone_frac = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0     # 1.0 = prone-side starts only
-env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=max_steps, prone_frac=prone_frac)
+supine_frac = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0    # 1.0 = supine-side starts only
+level = float(sys.argv[6]) if len(sys.argv) > 6 else 1.0
+env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=max_steps, prone_frac=prone_frac, supine_frac=supine_frac, level=level)
 rows = []
 for seed in range(n):
     obs, _ = env.reset(seed=seed)

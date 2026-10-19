@@ -34,6 +34,9 @@ def _setup():
     torch.set_num_threads(1)
 
 
+SEED0 = int(os.environ.get("STANDAI_BENCH_SEED0", "0"))   # shift the seeds of the calm / floor / controller runs (fresh seeds for confirmation); the eval npz sets are fixed
+
+
 def task_stand_catch(stand, q):
     _setup()
     from stand_progress_notify import handoff_catch
@@ -53,7 +56,7 @@ def task_stand_calm(stand, n):
     env = LocomotionEnv(stand_only=True)
     env.set_calm_frac(1.0)
     rows = []
-    for seed in range(n):
+    for seed in range(SEED0, SEED0 + n):
         env.reset(seed=seed)
         knee = float(np.degrees(min(env.data.qpos[env._knee_r_qpos], env.data.qpos[env._knee_l_qpos])))
         obs = env._obs()
@@ -81,7 +84,7 @@ def task_floor(side, floor, stand, n):
     env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
     reached = held = 0
-    for seed in range(n):
+    for seed in range(SEED0, SEED0 + n):
         obs, _ = env.reset(seed=seed)
         for _ in range(450):
             a, _ = fl.predict(obs, deterministic=True)
@@ -102,17 +105,18 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n, side=None, level=1.0):
+def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None):
     _setup()
     import numpy as np
     from controller import GetUpController
     from floor_env import FloorEnv
     env = FloorEnv(standready=True, level=level, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
-    ctl = GetUpController(supine, prone, stand, fall_back=True)
+    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",))
     s10 = send = hand = 0
     T = 1000
-    for seed in range(n):
+    s0 = SEED0 if seed0 is None else seed0
+    for seed in range(s0, s0 + n):
         obs, _ = env.reset(seed=seed)
         ctl.reset(env)
         hist = []
@@ -135,6 +139,7 @@ def main():
     p = argparse.ArgumentParser()
     for k, v in DEFAULTS.items():
         p.add_argument(f"--{k}", default=v)
+    p.add_argument("--handover", default=None, help="hand-over policy checkpoint (scripts/handover_env.py); default none")
     p.add_argument("--tag", default="default")
     p.add_argument("--quick", action="store_true")
     p.add_argument("--workers", type=int, default=4)
@@ -149,9 +154,9 @@ def main():
             "stand_calm": ex.submit(task_stand_calm, a.stand, n_calm),
             "floor_supine": ex.submit(task_floor, "supine", a.supine, a.stand, n_floor),
             "floor_prone": ex.submit(task_floor, "prone", a.prone, a.stand, n_floor),
-            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl, None, a.handover_level),
-            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine", a.handover_level),
-            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone", a.handover_level),
+            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl, None, a.handover_level, a.handover),
+            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine", a.handover_level, a.handover),
+            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone", a.handover_level, a.handover),
         }
         res = {k: f.result() for k, f in futs.items()}
     res["checkpoints"] = {k: os.path.basename(getattr(a, k)) for k in DEFAULTS}

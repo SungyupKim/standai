@@ -16,13 +16,15 @@ p = argparse.ArgumentParser()
 p.add_argument("--ckpt", required=True)
 p.add_argument("--n", type=int, default=2000)
 p.add_argument("--prone-frac", type=float, default=0.0)
+p.add_argument("--supine-frac", type=float, default=0.0, help="1.0 = supine-side starts only")
+p.add_argument("--level", type=float, default=1.0, help="hand-off region strictness (1.0 strict ... 0.0 loose); the hand-over policy for loose arrivals is trained on level 0.3 pools")
 p.add_argument("--first-seed", type=int, default=1000)
 p.add_argument("--out", required=True)
 p.add_argument("--deterministic", action="store_true", help="never sample actions (evaluation sets)")
 a = p.parse_args()
 
 model = PPO.load(a.ckpt, device="cpu")
-env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, prone_frac=a.prone_frac, down_timeout=False)
+env = FloorEnv(standready=True, crouch_frac=0.0, max_steps=450, prone_frac=a.prone_frac, supine_frac=a.supine_frac, level=a.level, down_timeout=False)
 qpos, qvel, heads, tries, seed = [], [], [], 0, a.first_seed
 t0 = time.time()
 while len(qpos) < a.n and tries < a.n * 5:
