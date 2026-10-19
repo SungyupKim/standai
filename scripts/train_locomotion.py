@@ -27,7 +27,7 @@ LOG_STD_MAX = np.log(0.6)
 
 class BreakdownCallback(BaseCallback):
     KEYS = ["height", "stability", "stance", "knee_avoid", "recovery", "jerk", "velocity", "gait", "brace", "com",
-            "stand_streak", "knee_straight", "torso_upright", "ground_height", "getup_shift", "getup_pen", "head_progress", "head_record", "speed_pen", "air_pen", "standready_dense", "settle"]
+            "stand_streak", "knee_straight", "torso_upright", "ground_height", "getup_shift", "getup_pen", "head_progress", "head_record", "speed_pen", "air_pen", "standready_dense", "settle", "step"]
 
     def __init__(self, window=100):
         super().__init__()
@@ -723,6 +723,84 @@ class HandoffPoolCallback(BaseCallback):
         return True
 
 
+class ComLadderPoolCallback(HandoffPoolCallback):
+    """Hand-off pool curriculum by how far the centre of mass is AHEAD of the front foot (the quantity that separates the states the stand policy
+    catches from the ones it does not: prone hand-offs, catch 84% below -5 cm, 22% at 0..5 cm, ~0% above +15 cm -- docs 3.22).
+
+    The pool (optionally only states from `first_index` on, e.g. the prone half of pool_big_all.npz) is sorted by COM-ahead. Level 0 offers the easiest
+    `start_frac` of it, every `every` steps the current policy is probed on the hardest quarter of what is offered (`n_probe` states, 3 s, never below
+    FALL_HEIGHT) and when the pass rate reaches `gate` the offer grows by `step` of the remaining range. `mirror` also offers the left-right swapped copy of every
+    state (scripts/sym.py: the stand policy is not left-right symmetric). The share of resets taken from the pool stays `frac`."""
+
+    MIRROR_PAIRS = [(9, 13), (10, 14), (11, 15), (5, 7), (6, 8)]
+
+    def __init__(self, path, frac=0.4, first_index=0, start_frac=0.3, gate=0.35, every=500_000, step=0.1, mirror=True, n_probe=100):
+        super().__init__(path, frac=frac)
+        self.first_index, self.start_frac, self.gate, self.every, self.step = first_index, start_frac, gate, every, step
+        self.mirror, self.n_probe = mirror, n_probe
+        self._level, self._n_allowed, self._probe_pass = 0.0, 0, None
+        self._rng = np.random.default_rng(0)
+
+    def _swap(self, q, v):
+        q, v = q.copy(), v.copy()
+        for a, b in self.MIRROR_PAIRS:
+            q[[a, b]] = q[[b, a]]
+            v[[a, b]] = v[[b, a]]
+        return q, v
+
+    def _build(self):
+        n = len(self._sorted)
+        self._n_allowed = int(round(n * (self.start_frac + (1.0 - self.start_frac) * self._level)))
+        pool = [(q, v, False) for q, v in self._sorted[:self._n_allowed]]
+        if self.mirror:
+            pool += [(*self._swap(q, v), False) for q, v in self._sorted[:self._n_allowed]]
+        self._pool = pool                                    # originals first: indices [0, n_allowed) are the unmirrored states
+        self._status = np.zeros(len(pool), dtype=np.int8)
+        self._cur = None
+        self._push()
+
+    def _on_training_start(self):
+        import mujoco
+        from locomotion_env import LocomotionEnv
+        d = np.load(self.path, allow_pickle=True)
+        Q, V = d["qpos"][self.first_index:], d["qvel"][self.first_index:]
+        env = LocomotionEnv(stand_only=True)
+        ahead = np.zeros(len(Q))
+        for i, (q, v) in enumerate(zip(Q, V)):
+            env.reset(seed=0)
+            env.data.qpos[:], env.data.qvel[:] = q, v
+            mujoco.mj_forward(env.model, env.data)
+            com_x = np.sum(env._a_masses * env.data.xipos[env._a_bodies, 0]) / env._a_masses.sum()
+            ahead[i] = com_x - max(env.data.site_xpos[s][0] for s in env.a_feet)
+        order = np.argsort(ahead)
+        self._sorted = [(Q[i], V[i]) for i in order]
+        self._ahead_sorted = ahead[order]
+        self._last_gate = self.num_timesteps
+        self._pass_rate = None
+        self._build()
+        print(f"[locomotion] COM-ahead ladder: {len(self._sorted)} states (from index {self.first_index}), mirror {self.mirror}, start {self.start_frac:.0%} of the pool = COM-ahead <= "
+              f"{self._ahead_sorted[self._n_allowed - 1]:+.3f} m; quantiles 10/50/90: {np.percentile(ahead, [10, 50, 90]).round(3).tolist()}; pool share {self._cur}", flush=True)
+
+    def _on_step(self):
+        if self.num_timesteps - self._last_gate >= self.every:
+            self._last_gate = self.num_timesteps
+            lo = int(0.75 * self._n_allowed)
+            idx = self._rng.choice(np.arange(lo, self._n_allowed), size=min(self.n_probe, self._n_allowed - lo), replace=False)
+            self._probe_pass = float(np.mean([self._hold_from_pool_state(int(i)) for i in idx]))
+            advanced = False
+            if self._probe_pass >= self.gate and self._level < 1.0:
+                self._level = min(1.0, self._level + self.step)
+                advanced = True
+                self._build()
+            print(f"[locomotion] COM-ahead ladder at {self.num_timesteps} steps: boundary pass {self._probe_pass:.2f} -> level {self._level:.2f}"
+                  f"{' (advanced)' if advanced else ''}, offered {self._n_allowed}/{len(self._sorted)} states up to COM-ahead {self._ahead_sorted[self._n_allowed - 1]:+.3f} m", flush=True)
+        self.logger.record("ladder/level", self._level)
+        self.logger.record("ladder/max_com_ahead", float(self._ahead_sorted[self._n_allowed - 1]))
+        if self._probe_pass is not None:
+            self.logger.record("ladder/boundary_pass", self._probe_pass)
+        return True
+
+
 class FallRateCallback(BaseCallback):
     """Fraction of completed episodes that ended via a_out (failed to recover within
     DOWN_RECOVERY_STEPS) rather than truncation at MAX_STEPS -- the direct metric this
@@ -798,6 +876,13 @@ def main():
     parser.add_argument("--handoff-pool", type=str, default=None,
                          help="npz from make_handoff_pool.py: start --handoff-frac of the episodes from the states the "
                               "floor get-up policy hands over (stand-only)")
+    parser.add_argument("--com-ladder", action="store_true", help="with --handoff-pool: offer the pool states in order of COM-ahead-of-front-foot (easy -> hard), see ComLadderPoolCallback")
+    parser.add_argument("--ladder-first-index", type=int, default=0, help="skip the first N states of the pool (pool_big_all.npz: 16000 = prone half only)")
+    parser.add_argument("--ladder-start", type=float, default=0.3, help="share of the sorted pool offered at level 0")
+    parser.add_argument("--ladder-gate", type=float, default=0.35, help="boundary pass rate that advances the ladder")
+    parser.add_argument("--ladder-every", type=int, default=500_000)
+    parser.add_argument("--ladder-step", type=float, default=0.1)
+    parser.add_argument("--ladder-no-mirror", action="store_true", help="do not add the left-right swapped copies")
     parser.add_argument("--handoff-frac", type=float, default=0.4,
                          help="share of episode starts drawn from the pool (the END value when --handoff-ramp-steps > 0)")
     parser.add_argument("--handoff-gate-calm", type=float, default=None,
@@ -929,7 +1014,11 @@ def main():
                                           already_relaxed=args.height_already_relaxed))
     if args.stand_only and args.replay_curriculum:
         callback_list.append(ReplayCurriculumCallback(frac=args.replay_frac))
-    if args.stand_only and args.handoff_pool:
+    if args.stand_only and args.handoff_pool and args.com_ladder:
+        callback_list.append(ComLadderPoolCallback(args.handoff_pool, frac=args.handoff_frac, first_index=args.ladder_first_index,
+                                                   start_frac=args.ladder_start, gate=args.ladder_gate, every=args.ladder_every,
+                                                   step=args.ladder_step, mirror=not args.ladder_no_mirror))
+    elif args.stand_only and args.handoff_pool:
         callback_list.append(HandoffPoolCallback(args.handoff_pool, frac=args.handoff_frac,
                                                  ramp_start=args.handoff_ramp_start, ramp_steps=args.handoff_ramp_steps,
                                                  gate_calm=args.handoff_gate_calm, gate_step=args.handoff_gate_step,

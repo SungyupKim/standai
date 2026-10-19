@@ -274,6 +274,8 @@ ARCHIVE_HEAD_HI = 1.10        # top rung: 'just stood up' (head past 0.9 m) -- t
 ARCHIVE_GAIN = 0.08           # frontier rule: only states >= this much above where THIS episode started are stored
 ARCHIVE_COOLDOWN = 10
 
+STEP_K = float(_os.environ.get("STANDAI_STEP_K", "0") or 0)          # feet-under-COM shaping weight (0 = off)
+STEP_MIN_TORSO = float(_os.environ.get("STANDAI_STEP_MIN_TORSO", "0.7"))
 REPLAY_JITTER_RAD = float(_os.environ.get("STANDAI_REPLAY_JITTER", "0.03"))  # joint jitter applied to replayed start states (failed-start replay)
 REPLAY_VEL_JITTER = float(_os.environ.get("STANDAI_REPLAY_VEL_JITTER", "0"))  # N(0, this) added to every qvel of a replayed start (rad/s, m/s); 0 = off
 REPLAY_PITCH_JITTER = float(_os.environ.get("STANDAI_REPLAY_PITCH_JITTER", "0"))  # extra N(0, this) rad on the root pitch of a replayed start
@@ -434,6 +436,7 @@ class LocomotionEnv(Fighter2DEnv):
         self._a_bodies = [i for i in range(self.model.nbody) if self.model.body(i).name.startswith("a_")]
         self._a_masses = np.array([self.model.body_mass[i] for i in self._a_bodies])
         self._prev_com_x = None
+        self._prev_step_phi = None
         base_dim = self.observation_space.shape[0]
         # +1 for target_vx, +3 for stand-only balance features (com_rel_x, com_rel_z, com_vel_x --
         # see _obs()). The base observation is just raw joint qpos/qvel, so a stand-only policy
@@ -568,6 +571,7 @@ class LocomotionEnv(Fighter2DEnv):
         self._is_calm = is_calm
         self._stand_streak = 0
         self._prev_com_x = None
+        self._prev_step_phi = None
         mujoco.mj_forward(self.model, self.data)
 
         saved_ctrl = self.data.ctrl.copy()
@@ -825,6 +829,18 @@ class LocomotionEnv(Fighter2DEnv):
             com_reward = COM_REWARD_SCALE * min(1.0, max(0.0, margin / COM_MARGIN_REF))
             if self._ground_shaping:
                 com_reward *= recovery_gate
+        # STANDAI_STEP_K>0: potential-based "bring the feet under the COM" shaping, phi = -min(|COM x - mean foot x|, 0.3 m). Paid only while the body is
+        # genuinely up (torso >= STEP_MIN_TORSO and |pitch| < 40 deg), so being dragged along by a fall earns nothing; the potential resets when the gate closes.
+        step_reward = 0.0
+        if self._stand_only and STEP_K > 0:
+            a_ry_s = (self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi
+            if self.data.xpos[self.a_torso_id][2] >= STEP_MIN_TORSO and abs(a_ry_s) < np.deg2rad(40.0):
+                phi = -min(abs(com_x - float(np.mean(feet_x))), 0.3)
+                if self._prev_step_phi is not None:
+                    step_reward = STEP_K * (0.99 * phi - self._prev_step_phi)
+                self._prev_step_phi = phi
+            else:
+                self._prev_step_phi = None
         ground_height_reward = 0.0
         getup_shift_reward = 0.0
         getup_penalty = 0.0
@@ -854,7 +870,7 @@ class LocomotionEnv(Fighter2DEnv):
             info["stand_streak_steps"] = self._stand_streak  # raw step count, uncapped -- for
                                                               # curriculum gating (CurriculumGateCallback)
         reward = (reward + velocity_reward + gait_reward + brace_reward + com_reward
-                  + stand_streak_reward + knee_straight_reward + torso_upright_reward
+                  + stand_streak_reward + knee_straight_reward + torso_upright_reward + step_reward
                   + ground_height_reward + getup_shift_reward - getup_penalty)
         info["reward_breakdown"]["getup_shift"] = getup_shift_reward
         info["reward_breakdown"]["getup_pen"] = -getup_penalty
@@ -862,6 +878,7 @@ class LocomotionEnv(Fighter2DEnv):
         info["reward_breakdown"]["gait"] = gait_reward
         info["reward_breakdown"]["brace"] = brace_reward
         info["reward_breakdown"]["com"] = com_reward
+        info["reward_breakdown"]["step"] = step_reward
         info["reward_breakdown"]["stand_streak"] = stand_streak_reward
         info["reward_breakdown"]["knee_straight"] = knee_straight_reward
         info["reward_breakdown"]["torso_upright"] = torso_upright_reward
