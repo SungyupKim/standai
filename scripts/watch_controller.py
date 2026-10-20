@@ -16,6 +16,7 @@ import numpy as np
 from controller import GetUpController
 from env import FRAME_SKIP
 from floor_env import FloorEnv
+from viewer_utils import hide_opponent
 
 A = "../checkpoints/"
 SUPINE = A + "autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip"
@@ -46,6 +47,7 @@ def main():
     n_ep = n_ok = 0
 
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+        hide_opponent(env.model, viewer)
         viewer.cam.lookat[:] = [0, 0, 0.8]
         viewer.cam.distance = 3.2
         viewer.cam.azimuth = -90

@@ -13,6 +13,7 @@ from stable_baselines3 import PPO
 
 from env import FRAME_SKIP
 from floor_env import FloorEnv, HANDOFF_HEAD_Z
+from viewer_utils import hide_opponent
 
 
 def run_episode(env, model, obs, on_step=None):
@@ -60,6 +61,7 @@ def main():
     n_ep = n_ok = 0
 
     with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+        hide_opponent(env.model, viewer)
         viewer.cam.lookat[:] = [0, 0, 0.8]
         viewer.cam.distance = 3.0
         viewer.cam.azimuth = -90

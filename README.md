@@ -16,7 +16,7 @@ rigorous track rather than being a side quest.
 
 ![Demo: selected successful runs of the whole system in simulation (supine and prone starts)](assets/demo.gif)
 
-*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy. They are picked from seeds that end standing; the overall rate is ~62% (supine ~49%, prone ~76%, 200 seeds per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
+*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy. They are picked from seeds that end standing without ever falling on the way (some other starts stand, fall and get up again, or never get up); the overall rate is ~62% (supine ~49%, prone ~76%, 200 seeds per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
 
 ## Update 2026-10-18
 

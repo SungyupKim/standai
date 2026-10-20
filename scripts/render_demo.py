@@ -1,6 +1,6 @@
 """Renders a demo video of the whole get-up system (floor policy -> hand-over policy (prone side) -> stand policy) offscreen, no display needed.
 
-Picks the first --supine-ok / --prone-ok starts (seeds from --seed0) that END STANDING after 20 s (benchmark definition: torso >= 0.95 m and |pitch| < 30 deg for the last
+Picks the first --supine-ok / --prone-ok starts (seeds from --seed0) that END STANDING after 20 s without ever falling on the way (--any-success lifts that) (benchmark definition: torso >= 0.95 m and |pitch| < 30 deg for the last
 25 steps), re-runs them (the policies are deterministic) and records the first --seconds of each. These are SELECTED SUCCESSES: the caption says so and quotes the overall rate.
 Writes assets/demo.mp4 (640x360, 25 fps) and assets/demo.gif (480x270, 12 fps). Needs ffmpeg and PIL.
 Usage: python scripts/render_demo.py [--supine-ok 2] [--prone-ok 2] [--seed0 31000] [--seconds 10] [--out assets/demo]
@@ -30,6 +30,10 @@ PRONE = A + "best_prone8.zip"
 STAND = A + "best_stand_v55b.zip"
 HANDOVER = A + "best_handover_prone.zip"
 FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
+SCENE_OPT = mujoco.MjvOption()
+SCENE_OPT.geomgroup[5] = 0      # hidden group: the parked opponent
+CLEAN_ONLY = True      # pick only runs that never fell on the way (see run())
+CLEAN_BY = 8.0         # seconds: must be standing by then
 MODE_LABEL = {"floor": ("Floor policy", (255, 200, 80)), "handover": ("Hand-over policy", (120, 200, 255)), "stand": ("Stand policy", (120, 230, 140))}
 
 
@@ -38,6 +42,15 @@ def font(size):
         if os.path.exists(f):
             return ImageFont.truetype(f, size)
     return ImageFont.load_default()
+
+
+def hide_opponent(model):
+    """The unused fighting opponent ('b', blue) is parked at x = 6 m; the tracking camera shows it once the body walks there. Move its geoms to a hidden visualization group
+    (scene option below) and make them fully transparent so they cast no shadow either."""
+    for g in range(model.ngeom):
+        if (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, model.geom_bodyid[g]) or "").startswith("b_"):
+            model.geom_group[g] = 5
+            model.geom_rgba[g, 3] = 0.0
 
 
 def make(side):
@@ -50,14 +63,19 @@ def make(side):
 def run(env, ctl, seed, steps, on_frame=None):
     obs, _ = env.reset(seed=seed)
     ctl.reset(env)
-    hist = []
+    hist, first_up = [], None
     for t in range(steps):
         if on_frame is not None:
             on_frame(t)
         obs, _, term, trunc, info = env.step(ctl.act(obs, env))
         ctl.observe(env, info)
         hist.append(float(env.data.xpos[env.a_torso_id][2]) >= 0.95 and abs(np.degrees(ctl.pitch(env))) < 30)
-    return len(hist) >= 25 and all(hist[-25:])
+        if first_up is None and len(hist) >= 25 and all(hist[-25:]):
+            first_up = t * 0.02
+    ok = len(hist) >= 25 and all(hist[-25:])
+    # clean = it never fell on the way: no stand-policy fall, no hand-over collapse, and it was up early enough to be seen in the clip
+    clean = ok and ctl.falls == 0 and ctl.ho_fail == 0 and first_up is not None and first_up <= CLEAN_BY
+    return clean if CLEAN_ONLY else ok
 
 
 def overlay(img, side, mode, t, caption):
@@ -82,15 +100,18 @@ def main():
     ap.add_argument("--seed0", type=int, default=31000)
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets", "demo"))
+    ap.add_argument("--any-success", action="store_true", help="also allow runs that fell and got up again on the way")
     ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~62% stand after 20 s (200 seeds/side).")
     a = ap.parse_args()
+    global CLEAN_ONLY
+    CLEAN_ONLY = not a.any_success
 
     steps20 = int(20.0 / (0.005 * FRAME_SKIP))
     picks = []
     for side, need in (("supine", a.supine_ok), ("prone", a.prone_ok)):
         env, ctl = make(side)
         seed, got, tried = a.seed0, 0, 0
-        while got < need and tried < 60:
+        while got < need and tried < 120:
             ok = run(env, ctl, seed, steps20)
             tried += 1
             if ok:
@@ -114,6 +135,7 @@ def main():
         env, ctl = make(side)
         if renderer is None:
             renderer = mujoco.Renderer(env.model, height=360, width=640)
+        hide_opponent(env.model)
         state = {"x": None}
 
         def on_frame(t):
@@ -123,7 +145,7 @@ def main():
             x = float(env.data.xpos[env.a_torso_id][0])
             state["x"] = x if state["x"] is None else 0.9 * state["x"] + 0.1 * x      # smoothed horizontal tracking
             cam.lookat[:] = [state["x"], 0.0, 0.7]
-            renderer.update_scene(env.data, camera=cam)
+            renderer.update_scene(env.data, camera=cam, scene_option=SCENE_OPT)
             frame = overlay(renderer.render(), side, ctl.mode, t * 0.02, a.caption)
             Image.fromarray(frame).save(f"{tmp}/f{n_frame:05d}.png")
             n_frame += 1
