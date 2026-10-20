@@ -115,6 +115,7 @@ def main():
     p.add_argument("--save-freq", type=int, default=25_000)
     p.add_argument("--ent-coef", type=float, default=0.002)
     p.add_argument("--std-min", type=float, default=0.45)
+    p.add_argument("--std-max", type=float, default=None, help="cap of the action std (default: train_locomotion.LOG_STD_MAX = 0.6); lowering it (with --std-min) narrows the exploration noise of a policy that depends on it")
     p.add_argument("--colored-noise-rho", type=float, default=0.9)
     p.add_argument("--floor-burst-rate", type=float, default=0.1)
     p.add_argument("--floor-burst-hold", type=int, default=10)
@@ -152,6 +153,8 @@ def main():
         print("[floor] training from scratch", flush=True)
 
     tl.LOG_STD_MIN = float(np.log(args.std_min))
+    if args.std_max is not None:
+        tl.LOG_STD_MAX = float(np.log(args.std_max))
     with torch.no_grad():
         model.policy.log_std.data.clamp_(min=tl.LOG_STD_MIN, max=tl.LOG_STD_MAX)
 

@@ -30,7 +30,7 @@ from sym import load_stand
 
 
 class GetUpController:
-    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",), v_gate=None, v_wait=50, floor_flip=0, flip_sides=("supine", "prone"), handover_forever=False):
+    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",), v_gate=None, v_wait=50, floor_flip=0, flip_sides=("supine", "prone"), handover_forever=False, floor_sample=False):
         self.supine = PPO.load(supine_ckpt, device="cpu")
         self.prone = PPO.load(prone_ckpt, device="cpu")
         self.stand = load_stand(stand_ckpt)      # STANDAI_SYM_STAND=1 -> left-right symmetrised (scripts/sym.py)
@@ -39,6 +39,7 @@ class GetUpController:
         self.handover_max = handover_max
         self.handover_sides = tuple(handover_sides)     # which floor policy's arrivals go through the hand-over policy (it was trained on prone hand-offs)
         self.floor_flip, self.flip_sides = int(floor_flip), tuple(flip_sides)   # every floor_flip steps the floor policy is shown the left-right swapped body (docs 3.24 addendum 3)
+        self.floor_sample = floor_sample               # sample the floor policy's actions (as in training) instead of using its mean; big networks trained with large exploration noise can depend on it
         self.handover_forever = handover_forever       # the hand-over policy keeps control (never passes to the stand policy); only a collapse sends it back to the floor policy
         self._floor_steps, self._flipped = 0, False
         self.v_gate, self.v_wait = v_gate, v_wait          # hand over only when the hand-over policy's critic V(s) >= v_gate (or after v_wait steps of waiting)
@@ -121,7 +122,7 @@ class GetUpController:
                 from sym import swap_action, swap_obs
                 action, _ = policy.predict(swap_obs(obs), deterministic=True)
                 return swap_action(action)
-        action, _ = policy.predict(obs, deterministic=True)
+        action, _ = policy.predict(obs, deterministic=not (self.floor_sample and self.mode == "floor"))
         return action
 
     def observe(self, env, info):

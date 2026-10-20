@@ -105,7 +105,7 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None, v_gate=None, flip=0, forever=False):
+def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None, v_gate=None, flip=0, forever=False, sample=False):
     _setup()
     import numpy as np
     from controller import GetUpController
@@ -113,7 +113,7 @@ def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None
     # level < 0: the loose 'reach' target of the from-scratch stage-1 floor runs (head >= 0.9 m + a foot down, no stand-ready region) instead of the stand-ready region
     env = FloorEnv(standready=level >= 0, level=max(level, 0.0), crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
-    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",), v_gate=v_gate, floor_flip=flip, handover_forever=forever)
+    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",), v_gate=v_gate, floor_flip=flip, handover_forever=forever, floor_sample=sample)
     s10 = send = hand = 0
     T = 1000
     s0 = SEED0 if seed0 is None else seed0
