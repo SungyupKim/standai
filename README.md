@@ -14,6 +14,10 @@ rigorous track rather than being a side quest.
 > **62.5%** standing after 20 s on seeds never used for any decision (supine start 49%, prone start 76%, 200 seeds each; the same seeds without the hand-over policy: 54.8%, with the previous stand policy and no hand-over policy: 47.8%). At the start of the project this was **0/160**.
 > Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); 200 seeds per side (+-3.5 points). The supine side (49%) is limited by the floor policy (26% of starts never reach the hand-over region; the rest often arrive leaning back, unrecoverable, docs 3.24). Reproduce: `STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/funnel.py --ho-prone checkpoints/best_handover_prone.zip --n 200 --seed0 13000` (~8 min).
 
+![Demo: selected successful runs of the whole system in simulation (supine and prone starts)](assets/demo.gif)
+
+*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy. They are picked from seeds that end standing; the overall rate is ~62% (supine ~49%, prone ~76%, 200 seeds per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
+
 ## Update 2026-10-18
 
 The stand policy is now `checkpoints/best_stand_v54.zip` (`v54` @20.3M): the controller (floor policy -> stand policy hand-over) stands after 20 s in **41%** of starts at the strict hand-over region (**50%** at level 0.7, see the result above; 50:50 supine/prone average, 200 seeds per side; the previous stand policy `v37`: 29%).

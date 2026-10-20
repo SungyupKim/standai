@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--lying-only", action="store_true",
                         help="with --standready: no crouched starts (matches the v9+ training / notifier evaluation)")
     parser.add_argument("--prone-frac", type=float, default=0.0, help="share of lying starts forced to the start-pitch <= 0 side (1.0 = only those)")
+    parser.add_argument("--supine-frac", type=float, default=0.0, help="share of lying starts forced to the start-pitch > 0 side (1.0 = supine only)")
     parser.add_argument("--no-down-timeout", action="store_true", help="disable env.py's 5 s 'stayed down' KO")
     parser.add_argument("--max-steps", type=int, default=None, help="episode length in steps (default 300 with --standready)")
     parser.add_argument("--skip-replay", action="store_true",
@@ -53,7 +54,7 @@ def main():
     model = PPO.load(args.checkpoint, device="cpu")
     stand = PPO.load(args.stand, device="cpu") if args.stand else None
     env = FloorEnv(standready=args.standready, crouch_frac=0.0 if args.lying_only else 0.4,
-                   max_steps=args.max_steps, prone_frac=args.prone_frac,
+                   max_steps=args.max_steps, prone_frac=args.prone_frac, supine_frac=args.supine_frac,
                    down_timeout=not args.no_down_timeout)
     dt = env.model.opt.timestep * FRAME_SKIP
     n_ep = n_ok = 0

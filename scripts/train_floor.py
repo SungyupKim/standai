@@ -110,6 +110,8 @@ def main():
     p.add_argument("--supine-frac", type=float, default=0.0, help="share of lying starts forced to the start-pitch > 0 side (inferred supine); 1.0 = supine only")
     p.add_argument("--learning-rate", type=float, default=None, help="override the (saved) PPO learning rate, e.g. 1e-4 when approx_kl/clip_fraction stay far above ~0.05/0.3")
     p.add_argument("--target-kl", type=float, default=None, help="PPO early-stops an update's epochs once approx_kl exceeds 1.5x this (e.g. 0.03)")
+    p.add_argument("--net-arch", type=int, nargs="+", default=None, help="hidden layer sizes of the policy AND value networks for a from-scratch run (e.g. 256 256); default = SB3 [64, 64]")
+    p.add_argument("--batch-size", type=int, default=None, help="PPO minibatch size for a from-scratch run (SB3 default 64)")
     p.add_argument("--save-freq", type=int, default=25_000)
     p.add_argument("--ent-coef", type=float, default=0.002)
     p.add_argument("--std-min", type=float, default=0.45)
@@ -142,6 +144,10 @@ def main():
         kw = {} if args.learning_rate is None else {"learning_rate": args.learning_rate}
         if args.target_kl is not None:
             kw["target_kl"] = args.target_kl
+        if args.net_arch:
+            kw["policy_kwargs"] = {"net_arch": {"pi": list(args.net_arch), "vf": list(args.net_arch)}}
+        if args.batch_size:
+            kw["batch_size"] = args.batch_size
         model = PPO("MlpPolicy", vec_env, device=args.device, verbose=1, ent_coef=args.ent_coef, **kw)
         print("[floor] training from scratch", flush=True)
 

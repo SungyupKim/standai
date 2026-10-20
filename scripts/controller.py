@@ -30,7 +30,7 @@ from sym import load_stand
 
 
 class GetUpController:
-    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",), v_gate=None, v_wait=50):
+    def __init__(self, supine_ckpt, prone_ckpt, stand_ckpt, fall_back=True, com_gate=None, wait_steps=25, handover_ckpt=None, handover_max=300, handover_sides=("prone",), v_gate=None, v_wait=50, floor_flip=0, flip_sides=("supine", "prone"), handover_forever=False):
         self.supine = PPO.load(supine_ckpt, device="cpu")
         self.prone = PPO.load(prone_ckpt, device="cpu")
         self.stand = load_stand(stand_ckpt)      # STANDAI_SYM_STAND=1 -> left-right symmetrised (scripts/sym.py)
@@ -38,6 +38,9 @@ class GetUpController:
         self.handover = PPO.load(handover_ckpt, device="cpu") if handover_ckpt else None   # optional hand-over policy between floor and stand
         self.handover_max = handover_max
         self.handover_sides = tuple(handover_sides)     # which floor policy's arrivals go through the hand-over policy (it was trained on prone hand-offs)
+        self.floor_flip, self.flip_sides = int(floor_flip), tuple(flip_sides)   # every floor_flip steps the floor policy is shown the left-right swapped body (docs 3.24 addendum 3)
+        self.handover_forever = handover_forever       # the hand-over policy keeps control (never passes to the stand policy); only a collapse sends it back to the floor policy
+        self._floor_steps, self._flipped = 0, False
         self.v_gate, self.v_wait = v_gate, v_wait          # hand over only when the hand-over policy's critic V(s) >= v_gate (or after v_wait steps of waiting)
         self._arrived = False
         self._arrive_wait = 0
@@ -70,6 +73,7 @@ class GetUpController:
         self._waited, self.forced = 0, 0
         self._ho_steps = self._ho_hold = self.ho_success = self.ho_fail = 0
         self._arrived, self._arrive_wait, self.v_forced = False, 0, 0
+        self._floor_steps, self._flipped = 0, False
         self._select_floor(env)
 
     @staticmethod
@@ -109,6 +113,14 @@ class GetUpController:
                 self._arrived = False
                 self._ho_steps = self._ho_hold = 0
         policy = self.stand if self.mode == "stand" else (self.handover if self.mode == "handover" else self.floor)
+        if self.mode == "floor" and self.floor_flip and self.floor_name in self.flip_sides:
+            if self._floor_steps > 0 and self._floor_steps % self.floor_flip == 0:
+                self._flipped = not self._flipped
+            self._floor_steps += 1
+            if self._flipped:
+                from sym import swap_action, swap_obs
+                action, _ = policy.predict(swap_obs(obs), deterministic=True)
+                return swap_action(action)
         action, _ = policy.predict(obs, deterministic=True)
         return action
 
@@ -133,14 +145,19 @@ class GetUpController:
             from handover_env import FAIL_TORSO, HOLD_STEPS, ok_state
             self._ho_steps += 1
             self._ho_hold = self._ho_hold + 1 if ok_state(env) else 0
-            if self._ho_hold >= HOLD_STEPS:
-                self.mode = "stand"; self.ho_success += 1
+            if self._ho_hold >= HOLD_STEPS and self._ho_hold == HOLD_STEPS:
+                self.ho_success += 1
+                if not self.handover_forever:
+                    self.mode = "stand"
+            if self.mode != "handover":
+                pass
             elif z < FAIL_TORSO:
-                self.mode = "floor"; self.ho_fail += 1; self._select_floor(env)
-            elif self._ho_steps >= self.handover_max:
+                self.mode = "floor"; self.ho_fail += 1; self._floor_steps, self._flipped = 0, False; self._select_floor(env)
+            elif self._ho_steps >= self.handover_max and not self.handover_forever:
                 self.mode = "stand"          # time out: let the stand policy try anyway
         elif z < FALL_HEIGHT:
             self.falls += 1
             if self.fall_back:
                 self.mode = "floor"
+                self._floor_steps, self._flipped = 0, False
                 self._select_floor(env)

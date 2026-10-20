@@ -4,7 +4,7 @@ Each episode runs --seconds (default 20 s, the benchmark's horizon); the console
 (torso >= 0.95 m and |pitch| < 30 deg, same definition as benchmark.py).
 
 DISPLAY=:1 ../.venv/bin/python watch_controller.py [--side supine|prone|mixed] [--level 0.7] [--seed 0]
-Defaults: v12 / prone8 / best_stand_v54, hand-over level 0.7, supine and prone starts alternate ('mixed' = the env's natural 80:20 draw).
+Defaults: v12 / prone8 / best_stand_v55b + best_handover_prone (prone side only), hand-over level 0.7, supine and prone starts alternate ('mixed' = the env's natural 80:20 draw).
 """
 import argparse
 import time
@@ -20,7 +20,8 @@ from floor_env import FloorEnv
 A = "../checkpoints/"
 SUPINE = A + "autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip"
 PRONE = A + "best_prone8.zip"
-STAND = A + "best_stand_v54.zip"
+STAND = A + "best_stand_v55b.zip"
+HANDOVER = A + "best_handover_prone.zip"
 
 
 def main():
@@ -31,13 +32,15 @@ def main():
     p.add_argument("--supine", default=SUPINE)
     p.add_argument("--prone", default=PRONE)
     p.add_argument("--stand", default=STAND)
+    p.add_argument("--handover", default=HANDOVER, help="hand-over policy used after the PRONE floor policy ('none' = off)")
     p.add_argument("--seed", type=int, default=0, help="first reset seed; increments per episode")
     p.add_argument("--pause", type=float, default=1.5)
     p.add_argument("--speed", type=float, default=1.0, help="playback speed (1.0 = real time)")
     a = p.parse_args()
 
     env = FloorEnv(standready=True, level=a.level, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False, prone_frac=0.0, supine_frac=0.0)
-    ctl = GetUpController(a.supine, a.prone, a.stand, fall_back=True)
+    ho = None if a.handover == "none" else a.handover
+    ctl = GetUpController(a.supine, a.prone, a.stand, fall_back=True, handover_ckpt=ho, handover_sides=("prone",))
     dt = env.model.opt.timestep * FRAME_SKIP / a.speed
     steps = int(a.seconds / (env.model.opt.timestep * FRAME_SKIP))
     n_ep = n_ok = 0

@@ -119,6 +119,16 @@ class FloorEnv(LocomotionEnv):
         # The natural split is ~80/20 and v12 @101.5M reaches 51% of the + side but 1/41 of the - side (200 seeds), so training
         # oversamples it. 0 = natural distribution (the evaluations keep 0, so fixed-seed numbers stay comparable).
         self._prone_frac = prone_frac
+        # STANDAI_FLAT_FRAC=<share>: that share of lying starts is forced to FLAT legs (mean hip angle < STANDAI_FLAT_HIP_DEG, default 10 deg). v12's supine starts that reach the
+        # hand-off region have the hips bent (median +32 deg), the ones that never get up have them straight (median -2 deg; docs 3.24 addendum 3).
+        # STANDAI_ARM_PUSH_COEF=<c>: while the torso is below 0.7 m and the head is rising (> 0.05 m/s), pay c * min(arm contact force / body weight, 1.5) per step. v12 gets up by
+        # swinging its arms (arm push 0.14 x weight); the prone policy pushes up with them (0.60 x weight when it succeeds, 0.11 when it fails; docs 3.24 addendum 3).
+        self._arm_coef = float(os.environ.get("STANDAI_ARM_PUSH_COEF", "0") or 0)
+        self._arm_bodies = {"a_upper_arm_r", "a_forearm_r", "a_upper_arm_l", "a_forearm_l"}
+        self._prev_head_z = None
+        self._flat_frac = float(os.environ.get("STANDAI_FLAT_FRAC", "0") or 0)
+        self._flat_hip = np.deg2rad(float(os.environ.get("STANDAI_FLAT_HIP_DEG", "10")))
+        self._hip_adr = [self.model.joint("a_hip_r").qposadr[0], self.model.joint("a_hip_l").qposadr[0]]
         self._supine_frac = supine_frac      # same for the start-pitch > 0 side (inferred supine); prone_frac and supine_frac are exclusive
         self._start_side = "pos"
         # episode length: None = SR_MAX_STEPS (standready) / FLOOR_MAX_STEPS. v11 @98.8M, lying starts, 100 seeds: 300 steps
@@ -171,6 +181,24 @@ class FloorEnv(LocomotionEnv):
         """COM x minus the front foot x (m); positive = the centre of mass is ahead of the support (assumes the body faces +x)."""
         return float(self.data.subtree_com[self._root_body][0] - max(self.data.site_xpos[s][0] for s in self.a_feet))
 
+    def _arm_force_ratio(self):
+        """Normal force of the floor on the arms (upper arms + forearms) divided by the body weight."""
+        import mujoco
+        names = getattr(self, "_geom_body_names", None)
+        if names is None:
+            self._getup_contacts()
+            names = self._geom_body_names
+        f6 = np.zeros(6)
+        tot = 0.0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            n1, n2 = names[c.geom1], names[c.geom2]
+            for n, o in ((n1, n2), (n2, n1)):
+                if n in self._arm_bodies and not (o.startswith("a_") or o.startswith("b_")):
+                    mujoco.mj_contactForce(self.model, self.data, i, f6)
+                    tot += f6[0]
+        return tot / (float(self._a_masses.sum()) * 9.81)
+
     def _start_pitch(self):
         return float((self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi)
 
@@ -188,9 +216,11 @@ class FloorEnv(LocomotionEnv):
         else:
             want_neg = self._prone_frac > 0.0 and self.np_random.random() < self._prone_frac
             want_pos = (not want_neg) and self._supine_frac > 0.0 and self.np_random.random() < self._supine_frac
+            want_flat = self._flat_frac > 0.0 and self.np_random.random() < self._flat_frac
             for _ in range(_MAX_RESAMPLE):
                 if self.data.xpos[self.a_torso_id][2] < FLOOR_START_Z and (not want_neg or self._start_pitch() <= 0.0) \
-                        and (not want_pos or self._start_pitch() > 0.0):
+                        and (not want_pos or self._start_pitch() > 0.0) \
+                        and (not want_flat or float(np.mean(self.data.qpos[self._hip_adr])) < self._flat_hip):
                     break
                 obs, info = super().reset(options=options)
         self._start_side = "neg" if self._start_pitch() <= 0.0 else "pos"
@@ -198,6 +228,7 @@ class FloorEnv(LocomotionEnv):
         self._floor_head_best = min(head, HANDOFF_HEAD_Z) / HANDOFF_HEAD_Z
         self._floor_head_max = head
         self._hold = 0
+        self._prev_head_z = head
         return obs, info
 
     def step(self, action):
@@ -268,9 +299,15 @@ class FloorEnv(LocomotionEnv):
         bonus = (SR_BONUS if self._standready else SUCCESS_BONUS) if success else 0.0
         if success and self._sv_model is not None:       # the arrival state is what the stand policy will have to hold: reward the ones it values
             sv += self._sv_bonus * v_norm
-        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen + sv
+        arm_push = 0.0
+        if self._arm_coef > 0.0:
+            head_vz = (head - (self._prev_head_z if self._prev_head_z is not None else head)) / 0.02
+            if torso < 0.7 and head_vz > 0.05:
+                arm_push = self._arm_coef * min(self._arm_force_ratio(), 1.5)
+        self._prev_head_z = head
+        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen + sv + arm_push
 
-        info["reward_breakdown"] = {"head_record": record, "ground_height": dense}
+        info["reward_breakdown"] = {"head_record": record, "ground_height": dense, "arm_push": arm_push}
         if self._settled or self._standready:
             info["reward_breakdown"]["settle"] = settle
         if self._standready:
