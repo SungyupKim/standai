@@ -8,15 +8,15 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 62%** of starts
+> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 65%** of starts
 >
-> Rule-based controller with three learned policies (floor policy -> hand-over policy (prone side) -> stand policy): `ppo_floor_v12` / `ppo_floor_prone8` / `checkpoints/best_handover_prone.zip` / `checkpoints/best_stand_v55b.zip`, hand-over region level 0.7:
-> **62.5%** standing after 20 s on seeds never used for any decision (supine start 49%, prone start 76%, 200 seeds each; the same seeds without the hand-over policy: 54.8%, with the previous stand policy and no hand-over policy: 47.8%). At the start of the project this was **0/160**.
-> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); 200 seeds per side (+-3.5 points). The supine side (49%) is limited by the floor policy (26% of starts never reach the hand-over region; the rest often arrive leaning back, unrecoverable, docs 3.24). Reproduce: `STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/funnel.py --ho-prone checkpoints/best_handover_prone.zip --n 200 --seed0 13000` (~8 min).
+> Rule-based controller with four PPO-trained policies (floor policy -> hand-over policy (prone side) -> stand policy): the supine floor policy and the stand policy are 256x256 nets distilled from the earlier 64x64 policies and fine-tuned (`checkpoints/best_floor_supine_fdist.zip`, `checkpoints/best_stand_big1.zip`), plus `best_prone8.zip` and `best_handover_prone.zip`, hand-over region level 0.7:
+> **~65%** standing after 20 s on seeds never used for any decision (supine start ~52%, prone start ~77.5%, 400 starts per side pooled over two fresh seed sets; the previous best system was ~58-62.5%). At the start of the project this was **0/160**.
+> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); +-2.5 points from sampling and about +-5 points between seed sets. The supine side is limited by the floor policy (how often it reaches the hand-over region). Reproduce: `STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/controller_side_eval.py --supine checkpoints/best_floor_supine_fdist.zip --stand checkpoints/best_stand_big1.zip --handover none --sides supine --levels 0.7 --n 200 --seed0 43000` (the demo video below shows the earlier 64x64 system).
 
 ![Demo: selected successful runs of the whole system in simulation (supine and prone starts)](assets/demo.gif)
 
-*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy. They are picked from seeds that end standing without ever falling on the way (some other starts stand, fall and get up again, or never get up); the overall rate is ~62% (supine ~49%, prone ~76%, 200 seeds per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
+*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy (the earlier 64x64 system). They are picked from seeds that end standing without ever falling on the way (some other starts stand, fall and get up again, or never get up); the overall rate is ~62% (supine ~49%, prone ~76%, 200 seeds per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
 
 ## Update 2026-10-18
 

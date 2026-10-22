@@ -10,9 +10,10 @@ CK = os.path.join(HERE, "..", "checkpoints") + "/"
 # log -> (label, total steps shown, includes the initial counter of the warm-started model)
 TRAIN = [("floor_train_bigp2.log", "엎드린 큰 네트워크 2단계(bigp2)", 35_000_000), ("floor_train_bigp1.log", "엎드린 큰 네트워크 1단계(bigp1)", 10_000_000),
          ("floor_train_bigd.log", "누운 큰 네트워크, 처음부터 최종 목표(bigd)", 20_000_000), ("floor_train_bigdA.log", "누운 bigd 이어서 학습(갈래 A)", None),
-         ("locomotion_train_stand_big1.log", "서기 정책 큰 네트워크 미세조정(갈래 B)", 50_000_000)]
+         ("locomotion_train_stand_big1.log", "서기 정책 큰 네트워크 미세조정(갈래 B)", 50_000_000),
+         ("floor_train_fdist.log", "누운 바닥 정책 증류 후 이어서 학습(fdist)", 40_000_000)]
 OTHER = [("distill_stand.log", "서기 정책 증류(갈래 B)"), ("analysis/ctl_prone_bigp2.out", "엎드린 bigp2 측정"), ("analysis/ctl_supine_bigd.out", "누운 bigd 측정"),
-         ("analysis/ctl_supine_bigdA.out", "누운 갈래 A 측정"), ("analysis/ladder_B_final.out", "갈래 B 최종 측정"), ("analysis/floor_ckpt_scan_bigdA.out", "체크포인트 스캔")]
+         ("analysis/ctl_supine_bigdA.out", "누운 갈래 A 측정"), ("analysis/ladder_B_final.out", "갈래 B 최종 측정"), ("distill_floor.log", "누운 바닥 정책 증류"), ("analysis/ctl_supine_fdist.out", "누운 fdist 최종 측정"), ("analysis/floor_ckpt_scan_fdist.out", "fdist 체크포인트 스캔"), ("analysis/floor_ckpt_scan_bigdA.out", "체크포인트 스캔")]
 
 
 def last_val(path, key):
@@ -33,31 +34,34 @@ def last_ladder_or_level(path):
 
 
 def describe():
-    now, parts = time.time(), []
+    now, blocks = time.time(), []
     for f, label, total in TRAIN:
         p = CK + f
         if os.path.exists(p) and now - os.path.getmtime(p) < 20 * 60:
-            ts, succ, lvl = last_val(p, "total_timesteps"), None, last_val(p, "level")
+            ts = last_val(p, "total_timesteps")
+            if ts is None:
+                blocks.append(f"🧩 {label}\n▸ 시작 중(아직 기록 없음)")
+                continue
+            succ = None
             for line in open(p, errors="ignore"):
                 m = re.match(r"\|\s+success_rate\s+\|\s+([\d.]+)", line)
                 if m:
                     succ = float(m.group(1))
-            s = f"[{label}] 스텝 {ts / 1e6:.1f}M" + (f"/{total / 1e6:.0f}M ({100 * ts / total:.0f}%)" if total and ts else "")
-            if succ is not None: s += f" | 학습 성공률 {succ:.2f}"
-            if lvl is not None: s += f" | 목표 레벨 {lvl:.2f}"
-            kl, std = last_val(p, "approx_kl"), last_val(p, "std")
-            if kl is not None: s += f" | KL {kl:.3f}"
-            if std is not None: s += f", std {std:.2f}"
-            if "stand" in f:
-                fr = last_val(p, "ep_rew_mean")
-                if fr is not None: s += f" | ep_rew {fr:.0f}"
-            parts.append(s)
+            lvl, kl, std = last_val(p, "level"), last_val(p, "approx_kl"), last_val(p, "std")
+            lines = [f"🧩 {label}", "▸ 진행 " + (f"{ts / 1e6:.1f}M / {total / 1e6:.0f}M ({100 * ts / total:.0f}%)" if total else f"{ts / 1e6:.1f}M")]
+            row = [x for x in (f"성공률 {succ:.2f}" if succ is not None else None, f"목표 레벨 {lvl:.2f}" if lvl is not None else None) if x]
+            if row: lines.append("▸ " + " · ".join(row))
+            row = [x for x in (f"KL {kl:.3f}" if kl is not None else None, f"std {std:.2f}" if std is not None else None) if x]
+            if row: lines.append("▸ 학습 상태 " + " · ".join(row))
+            blocks.append("\n".join(lines))
     for f, label in OTHER:
         p = CK + f
         if os.path.exists(p) and now - os.path.getmtime(p) < 20 * 60:
-            tail = [l.strip()[:150] for l in open(p, errors="ignore").read().splitlines() if l.strip()][-3:]
-            parts.append(f"[{label}] " + " / ".join(tail))
-    return parts
+            keep = [l.strip() for l in open(p, errors="ignore").read().splitlines()
+                    if l.strip() and "arn" not in l and "site-packages" not in l and "params)" not in l and not l.lstrip().startswith("opt.")]
+            tail = [re.sub(r"\s+", " ", l)[:70] for l in keep][-3:]
+            blocks.append(f"🔬 {label}\n" + ("\n".join("▸ " + t for t in tail) if tail else "▸ 진행 중 (데이터 수집·학습 단계, 출력은 아직 없음)"))
+    return blocks
 
 
 def pipelines_alive():
@@ -69,13 +73,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval-minutes", type=float, default=30)
     ap.add_argument("--once", action="store_true"); ap.add_argument("--dry", action="store_true")
+    ap.add_argument("--skip-first", action="store_true", help="do not send at start-up, only after the first interval")
     a = ap.parse_args()
     from kakao_notify import send_message
     idle = 0
     while True:
+        if a.skip_first and idle == 0 and not getattr(main, '_slept', False):
+            main._slept = True
+            time.sleep(a.interval_minutes * 60)
         parts = describe()
         alive = pipelines_alive()
-        msg = f"[{time.strftime('%H:%M')} 경과] " + ("\n".join(parts) if parts else "지금 쓰는 로그 없음(단계 전환 중이거나 대기)") + ("" if alive else "\n(파이프라인 스크립트가 모두 끝남)")
+        body = "\n\n".join(parts) if parts else "💤 지금 쓰는 로그 없음 (단계 전환 중이거나 대기)"
+        msg = f"⏱ {time.strftime('%H:%M')} 경과\n━━━━━━━━━━\n{body}" + ("" if alive else "\n\n🏁 파이프라인 스크립트가 모두 끝났습니다")
         print(msg, flush=True)
         if not a.dry:
             try:

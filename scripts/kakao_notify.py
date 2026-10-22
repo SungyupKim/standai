@@ -16,6 +16,7 @@ Or from another script:
 """
 import argparse
 import json
+import re
 import pathlib
 import time
 import urllib.parse
@@ -75,7 +76,7 @@ def _refresh(tokens):
     return tokens
 
 
-def send_message(text):
+def _send_one(text):
     tokens = _load_tokens()
     if time.time() - tokens["obtained_at"] > tokens.get("expires_in", 21599) - 60:
         tokens = _refresh(tokens)
@@ -100,6 +101,69 @@ def send_message(text):
         req.headers["Authorization"] = f"Bearer {tokens['access_token']}"
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read().decode())
+
+
+
+# ---- readability: tidy a message and split it into <= LIMIT-character parts (Kakao's text template shows about 200 characters per message) ----
+LIMIT = 190
+
+
+def _shorten_names(line):
+    line = re.sub(r"ppo_floor_v12_[0-9_]*", "v12", line)
+    line = re.sub(r"floor_supine_(\w+?)\.zi?p?", r"\1", line)           # file names cut by `cut -c` in the shell scripts
+    line = re.sub(r"(\w+)\.zip", r"\1", line)
+    line = line.replace("handover_supine_s2", "s2").replace("best_handover_prone", "인계정책").replace("v_gate None flip 0: ", "")
+    return line
+
+
+def prettify(text):
+    """Controller-evaluation lines -> '20초 서기 40% (80/200)'; '[tag] text' -> '📌 tag' headers; long file names shortened. Other lines untouched."""
+    out = []
+    for raw in text.splitlines():
+        line = _shorten_names(raw.rstrip())
+        m = re.search(r"standing at 20 s (\d+)/(\d+)\s*\((?:10 s (\d+), )?handed over (\d+)\)", line)
+        if m:
+            k, n, h = int(m.group(1)), int(m.group(2)), int(m.group(4))
+            head = line[:m.start()].replace("floor ", "").replace("hand-over ", "").replace("supine ", "").replace("prone ", "")
+            head = re.sub(r"\s+", " ", head).strip(" :")
+            line = f" · {head}: 20초 서기 {100 * k / n:.0f}% ({k}/{n}), 인계 {100 * h / n:.0f}%"
+        else:
+            m = re.match(r"\[(.+?)\]\s*(.*)", line)
+            if m:
+                line = "📌 " + m.group(1) + (("\n" + m.group(2)) if m.group(2) else "")
+        out.append(line)
+    return "\n".join(out)
+
+
+def split_message(text, limit=LIMIT):
+    """Split on line breaks into parts of at most `limit` characters; parts are numbered '(i/n)' when there is more than one."""
+    parts, cur = [], ""
+    for line in text.splitlines():
+        while len(line) > limit:                       # a single very long line: cut at a space
+            cut = line.rfind(" ", 0, limit) if " " in line[:limit] else limit
+            cut = cut if cut > 20 else limit
+            if cur: parts.append(cur); cur = ""
+            parts.append(line[:cut]); line = line[cut:].lstrip()
+        if len(cur) + len(line) + 1 > limit and cur:
+            parts.append(cur); cur = line
+        else:
+            cur = (cur + "\n" + line) if cur else line
+    if cur: parts.append(cur)
+    if len(parts) > 1:
+        parts = [f"({i + 1}/{len(parts)})\n{p}" for i, p in enumerate(parts)]
+    return parts or [""]
+
+
+def send_message(text):
+    """Tidies the text (prettify) and sends it in parts of at most LIMIT characters. KAKAO_RAW=1 sends it unchanged."""
+    import os
+    if os.environ.get("KAKAO_RAW") == "1":
+        return _send_one(text)
+    last = None
+    for part in split_message(prettify(text)):
+        last = _send_one(part)
+        time.sleep(0.4)
+    return last
 
 
 def main():
