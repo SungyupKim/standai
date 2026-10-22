@@ -20,12 +20,14 @@ p.add_argument("--ckpt", default=None)
 p.add_argument("--n", type=int, default=1500)
 p.add_argument("--out", default="../checkpoints/handoff_pool_v4.npz")
 p.add_argument("--first-seed", type=int, default=1000)
+p.add_argument("--supine-only", action="store_true", help="every start is a supine (face-up) lying start")
+p.add_argument("--level", type=float, default=1.0, help="FloorEnv hand-over strictness of the success pose")
 p.add_argument("--deterministic", action="store_true", help="never sample actions (evaluation sets)")
 args = p.parse_args()
 
 ckpt = args.ckpt or max(glob.glob("../checkpoints/autosave/ppo_floor_v4_*_steps.zip"), key=os.path.getmtime)
 model = PPO.load(ckpt, device="cpu")
-env = FloorEnv()
+env = FloorEnv(level=args.level, supine_frac=1.0 if args.supine_only else 0.0)
 qpos, qvel, heads, tries = [], [], [], 0
 seed = args.first_seed
 while len(qpos) < args.n and tries < args.n * 6:
