@@ -63,18 +63,21 @@ def make(side):
 def run(env, ctl, seed, steps, on_frame=None):
     obs, _ = env.reset(seed=seed)
     ctl.reset(env)
-    hist, first_up = [], None
+    hist, first_up, up_once, dipped = [], None, False, False
     for t in range(steps):
         if on_frame is not None:
             on_frame(t)
         obs, _, term, trunc, info = env.step(ctl.act(obs, env))
         ctl.observe(env, info)
+        th = float(env.data.xpos[env.a_torso_id][2])
+        up_once = up_once or th >= 0.9
+        dipped = dipped or (up_once and th < 0.75)    # stood up once, then sank back / fell: not a clean run
         hist.append(float(env.data.xpos[env.a_torso_id][2]) >= 0.95 and abs(np.degrees(ctl.pitch(env))) < 30)
         if first_up is None and len(hist) >= 25 and all(hist[-25:]):
             first_up = t * 0.02
     ok = len(hist) >= 25 and all(hist[-25:])
     # clean = it never fell on the way: no stand-policy fall, no hand-over collapse, and it was up early enough to be seen in the clip
-    clean = ok and ctl.falls == 0 and ctl.ho_fail == 0 and first_up is not None and first_up <= CLEAN_BY
+    clean = ok and not dipped and ctl.falls == 0 and ctl.ho_fail == 0 and first_up is not None and first_up <= CLEAN_BY
     return clean if CLEAN_ONLY else ok
 
 
