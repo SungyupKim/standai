@@ -63,13 +63,16 @@ def make(side):
 def run(env, ctl, seed, steps, on_frame=None):
     obs, _ = env.reset(seed=seed)
     ctl.reset(env)
-    hist, first_up, up_once, dipped = [], None, False, False
+    hist, first_up, up_once, dipped, head_peak = [], None, False, False, 0.0
     for t in range(steps):
         if on_frame is not None:
             on_frame(t)
         obs, _, term, trunc, info = env.step(ctl.act(obs, env))
         ctl.observe(env, info)
         th = float(env.data.xpos[env.a_torso_id][2])
+        hd = float(env.data.xpos[env.a_head_id][2])
+        head_peak = max(head_peak, hd)
+        dipped = dipped or (head_peak >= 0.7 and hd < head_peak - 0.35)    # got the head up, then dropped back down (sat/fell back): not a clean rise
         up_once = up_once or th >= 0.9
         dipped = dipped or (up_once and th < 0.75)    # stood up once, then sank back / fell: not a clean run
         hist.append(float(env.data.xpos[env.a_torso_id][2]) >= 0.95 and abs(np.degrees(ctl.pitch(env))) < 30)
