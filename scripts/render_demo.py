@@ -25,9 +25,9 @@ from env import FRAME_SKIP
 from floor_env import FloorEnv
 
 A = os.path.join(HERE, "..", "checkpoints") + "/"
-SUPINE = A + "autosave/ppo_floor_v12_20261013_204028_101475000_steps.zip"
+SUPINE = A + "best_floor_supine_fdist.zip"
 PRONE = A + "best_prone8.zip"
-STAND = A + "best_stand_v55b.zip"
+STAND = A + "best_stand_big1.zip"
 HANDOVER = A + "best_handover_prone.zip"
 FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"]
 SCENE_OPT = mujoco.MjvOption()
@@ -101,7 +101,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets", "demo"))
     ap.add_argument("--any-success", action="store_true", help="also allow runs that fell and got up again on the way")
-    ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~62% stand after 20 s (200 seeds/side).")
+    ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~65% stand after 20 s (200-400 seeds/side).")
     a = ap.parse_args()
     global CLEAN_ONLY
     CLEAN_ONLY = not a.any_success
