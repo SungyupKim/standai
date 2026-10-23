@@ -11,9 +11,11 @@ CK = os.path.join(HERE, "..", "checkpoints") + "/"
 TRAIN = [("floor_train_bigp2.log", "엎드린 큰 네트워크 2단계(bigp2)", 35_000_000), ("floor_train_bigp1.log", "엎드린 큰 네트워크 1단계(bigp1)", 10_000_000),
          ("floor_train_bigd.log", "누운 큰 네트워크, 처음부터 최종 목표(bigd)", 20_000_000), ("floor_train_bigdA.log", "누운 bigd 이어서 학습(갈래 A)", None),
          ("locomotion_train_stand_big1.log", "서기 정책 큰 네트워크 미세조정(갈래 B)", 50_000_000),
-         ("floor_train_fdist.log", "누운 바닥 정책 증류 후 이어서 학습(fdist)", 40_000_000)]
+         ("floor_train_fdist.log", "누운 바닥 정책 증류 후 이어서 학습(fdist)", 40_000_000),
+         ("locomotion_train_stand_big2.log", "서기 정책 새 누운 도착 상태로 이어서 학습(big2)", 80_000_000),
+         ("floor_train_fdist2.log", "누운 바닥 정책 fdist 100M 더(fdist2)", 100_000_000)]
 OTHER = [("distill_stand.log", "서기 정책 증류(갈래 B)"), ("analysis/ctl_prone_bigp2.out", "엎드린 bigp2 측정"), ("analysis/ctl_supine_bigd.out", "누운 bigd 측정"),
-         ("analysis/ctl_supine_bigdA.out", "누운 갈래 A 측정"), ("analysis/ladder_B_final.out", "갈래 B 최종 측정"), ("distill_floor.log", "누운 바닥 정책 증류"), ("analysis/ctl_supine_fdist.out", "누운 fdist 최종 측정"), ("analysis/floor_ckpt_scan_fdist.out", "fdist 체크포인트 스캔"), ("analysis/floor_ckpt_scan_bigdA.out", "체크포인트 스캔")]
+         ("analysis/ctl_supine_bigdA.out", "누운 갈래 A 측정"), ("analysis/ladder_B_final.out", "갈래 B 최종 측정"), ("distill_floor.log", "누운 바닥 정책 증류"), ("analysis/ctl_supine_fdist.out", "누운 fdist 최종 측정"), ("analysis/floor_ckpt_scan_fdist.out", "fdist 체크포인트 스캔"), ("analysis/ctl_stand_big2.out", "서기 big2 최종 측정"), ("analysis/floor_ckpt_scan_fdist2.out", "fdist2 체크포인트 스캔"), ("analysis/ctl_supine_fdist2.out", "누운 fdist2 최종 측정"), ("analysis/floor_ckpt_scan_bigdA.out", "체크포인트 스캔")]
 
 
 def last_val(path, key):
