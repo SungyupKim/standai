@@ -107,7 +107,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets", "demo"))
     ap.add_argument("--any-success", action="store_true", help="also allow runs that fell and got up again on the way")
-    ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~65% stand after 20 s (200-400 seeds/side).")
+    ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~68% stand after 20 s (fresh seeds, 400-1600 per side).")
     a = ap.parse_args()
     global CLEAN_ONLY
     CLEAN_ONLY = not a.any_success
