@@ -63,6 +63,8 @@ def make(side):
 def run(env, ctl, seed, steps, on_frame=None):
     obs, _ = env.reset(seed=seed)
     ctl.reset(env)
+    if float(env.data.xpos[env.a_torso_id][2]) >= 0.5:
+        return False        # FloorEnv keeps a non-lying start when 30 resamples fail (1.2% of prone starts, 0 supine): such a start always 'succeeds', never show it
     hist, first_up, up_once, dipped, head_peak = [], None, False, False, 0.0
     for t in range(steps):
         if on_frame is not None:
