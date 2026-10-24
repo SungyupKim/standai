@@ -131,6 +131,17 @@ class FloorEnv(LocomotionEnv):
         self._arr_k = float(os.environ.get("STANDAI_ARRIVAL_K", "0") or 0)
         self._arr_v = float(os.environ.get("STANDAI_ARRIVAL_VX", "0.45"))
         self._arr_prev_com_x = None
+        # STANDAI_CATCH_K=<k> + STANDAI_CATCH_STAND=<stand policy zip> (OPT-IN, standready only): at the success step the frozen stand policy is run for STANDAI_CATCH_STEPS (default 150) steps from
+        # the arrival state and k is paid if it CATCHES it (torso >= 0.7, head >= 0.9, |pitch| < 40 deg for the last 20 steps = benchmark/catch_by_com criterion). The episode ends at success anyway, so
+        # the rollout only has to read the outcome (deterministic stand policy -> the reward is a deterministic function of the arrival state). docs 3.24 addendum 11.
+        self._catch_k = float(os.environ.get("STANDAI_CATCH_K", "0") or 0)
+        self._catch_n = int(os.environ.get("STANDAI_CATCH_STEPS", "150"))
+        self._catch_early = int(os.environ.get("STANDAI_CATCH_EARLY", "0") or 0)
+        self._catch_model = None
+        if self._catch_k > 0.0:
+            from sym import load_stand
+            import torch; torch.set_num_threads(1)
+            self._catch_model = load_stand(os.environ["STANDAI_CATCH_STAND"])
         self._flat_frac = float(os.environ.get("STANDAI_FLAT_FRAC", "0") or 0)
         self._flat_hip = np.deg2rad(float(os.environ.get("STANDAI_FLAT_HIP_DEG", "10")))
         self._hip_adr = [self.model.joint("a_hip_r").qposadr[0], self.model.joint("a_hip_l").qposadr[0]]
@@ -237,6 +248,23 @@ class FloorEnv(LocomotionEnv):
         self._arr_prev_com_x = None
         return obs, info
 
+    def catch_rollout(self, stand_model, n=150):
+        """Runs `stand_model` (deterministic) from the CURRENT state for n steps and returns True if it catches it (benchmark criterion); the env state is consumed."""
+        obs = self._obs()
+        run = 0
+        for _ in range(n):
+            a, _ = stand_model.predict(obs, deterministic=True)
+            obs, *_ = super().step(a)
+            z = float(self.data.xpos[self.a_torso_id][2])
+            if z < 0.45:
+                return False
+            pitch = (self.data.qpos[self.a_ry_qpos] + np.pi) % (2 * np.pi) - np.pi
+            ok = z >= 0.7 and float(self.data.xpos[self.a_head_id][2]) >= 0.9 and abs(float(pitch)) < np.deg2rad(40)
+            run = run + 1 if ok else 0
+            if self._catch_early and run >= self._catch_early:      # STANDAI_CATCH_EARLY=<steps>: already held that long -> caught, stop the rollout (speed; the trainer waits for the slowest env)
+                return True
+        return run >= 20
+
     def step(self, action):
         obs, _parent_reward, terminated, truncated, info = super().step(action)
         head = float(self.data.xpos[self.a_head_id][2])
@@ -338,4 +366,9 @@ class FloorEnv(LocomotionEnv):
             info["start_side"] = self._start_side
             info["floor_level"] = self._level
             info["floor_head_max"] = self._floor_head_max
+        if success and self._catch_model is not None and self._standready:
+            caught = self.catch_rollout(self._catch_model, self._catch_n)
+            reward += self._catch_k * float(caught)
+            info["reward_breakdown"]["catch"] = self._catch_k * float(caught)
+            info["catch"] = bool(caught)
         return obs, reward, terminated, truncated, info
