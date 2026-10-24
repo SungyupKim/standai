@@ -22,6 +22,8 @@ Usage:
         obs, _, term, trunc, info = env.step(ctl.act(obs, env))
         ctl.observe(env, info)
 """
+import os
+
 import numpy as np
 from stable_baselines3 import PPO
 
@@ -58,6 +60,11 @@ class GetUpController:
         self.com_gate, self.wait_steps = com_gate, wait_steps
         self._waited = 0
         self.forced = 0
+        # diagnostic (docs 3.24 addendum 10): wait with the hand-over until the COM moves forward at >= STANDAI_VX_GATE m/s (at most STANDAI_VX_WAIT steps); set per command with `env`, never export
+        _g = os.environ.get("STANDAI_VX_GATE")
+        self.vx_gate = float(_g) if _g else None
+        self.vx_wait = int(os.environ.get("STANDAI_VX_WAIT", "50"))
+        self._vx_waited, self._com_prev, self._vx, self.vx_forced = 0, None, 0.0, 0
 
     @staticmethod
     def pitch(env):
@@ -72,6 +79,7 @@ class GetUpController:
     def reset(self, env):
         self.mode, self.handovers, self.falls = "floor", 0, 0
         self._waited, self.forced = 0, 0
+        self._vx_waited, self._com_prev, self._vx, self.vx_forced = 0, None, 0.0, 0
         self._ho_steps = self._ho_hold = self.ho_success = self.ho_fail = 0
         self._arrived, self._arrive_wait, self.v_forced = False, 0, 0
         self._floor_steps, self._flipped = 0, False
@@ -87,6 +95,11 @@ class GetUpController:
         return com_x - max(fx), abs(fz[0] - fz[1])
 
     def _may_hand_over(self, env):
+        if self.vx_gate is not None and self._vx < self.vx_gate:
+            self._vx_waited += 1
+            if self._vx_waited < self.vx_wait:
+                return False
+            self.vx_forced += 1
         if self.com_gate is None:
             return True
         ahead, gap = self.com_ahead_of_front_foot(env)
@@ -128,6 +141,9 @@ class GetUpController:
     def observe(self, env, info):
         """Call after env.step with the info it returned; updates the mode."""
         z = float(env.data.xpos[env.a_torso_id][2])
+        com_x = float(np.sum(env._a_masses * env.data.xipos[env._a_bodies, 0]) / env._a_masses.sum())
+        self._vx = 0.0 if self._com_prev is None else (com_x - self._com_prev) / 0.02
+        self._com_prev = com_x
         if self.mode == "floor":
             use_ho = self.handover is not None and self.floor_name in self.handover_sides
             self._arrived = bool(use_ho and self.v_gate is not None and info.get("floor_success"))
@@ -139,6 +155,7 @@ class GetUpController:
                 self.mode = "handover" if (self.handover is not None and self.floor_name in self.handover_sides) else "stand"
                 self.handovers += 1
                 self._waited = 0
+                self._vx_waited = 0
                 self._ho_steps = self._ho_hold = 0
             elif z < FALL_HEIGHT:
                 self._select_floor(env)        # re-pick by the current pitch sign while the body is down

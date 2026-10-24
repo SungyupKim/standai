@@ -126,6 +126,11 @@ class FloorEnv(LocomotionEnv):
         self._arm_coef = float(os.environ.get("STANDAI_ARM_PUSH_COEF", "0") or 0)
         self._arm_bodies = {"a_upper_arm_r", "a_forearm_r", "a_upper_arm_l", "a_forearm_l"}
         self._prev_head_z = None
+        # STANDAI_ARRIVAL_K=<k> (OPT-IN, standready only): at the success step pay k * (clip(COM forward speed, -0.2, V)/V - clip((pitch_deg - 3)/20, 0, 1)), V = STANDAI_ARRIVAL_VX (default 0.45 m/s).
+        # Supine arrivals that end standing carry COM speed +0.44 m/s and ~1 deg pitch, the ones that do not ~0 m/s and ~7.5 deg (docs 3.24 addendum 10): a continuous physical arrival score.
+        self._arr_k = float(os.environ.get("STANDAI_ARRIVAL_K", "0") or 0)
+        self._arr_v = float(os.environ.get("STANDAI_ARRIVAL_VX", "0.45"))
+        self._arr_prev_com_x = None
         self._flat_frac = float(os.environ.get("STANDAI_FLAT_FRAC", "0") or 0)
         self._flat_hip = np.deg2rad(float(os.environ.get("STANDAI_FLAT_HIP_DEG", "10")))
         self._hip_adr = [self.model.joint("a_hip_r").qposadr[0], self.model.joint("a_hip_l").qposadr[0]]
@@ -229,6 +234,7 @@ class FloorEnv(LocomotionEnv):
         self._floor_head_max = head
         self._hold = 0
         self._prev_head_z = head
+        self._arr_prev_com_x = None
         return obs, info
 
     def step(self, action):
@@ -299,15 +305,21 @@ class FloorEnv(LocomotionEnv):
         bonus = (SR_BONUS if self._standready else SUCCESS_BONUS) if success else 0.0
         if success and self._sv_model is not None:       # the arrival state is what the stand policy will have to hold: reward the ones it values
             sv += self._sv_bonus * v_norm
+        com_x = float(np.sum(self._a_masses * self.data.xipos[self._a_bodies, 0]) / self._a_masses.sum())
+        com_vx = 0.0 if self._arr_prev_com_x is None else (com_x - self._arr_prev_com_x) / 0.02
+        self._arr_prev_com_x = com_x
+        arrival = 0.0
+        if success and self._arr_k > 0.0 and self._standready:
+            arrival = self._arr_k * (float(np.clip(com_vx, -0.2, self._arr_v)) / self._arr_v - float(np.clip((np.degrees(pitch) - 3.0) / 20.0, 0.0, 1.0)))
         arm_push = 0.0
         if self._arm_coef > 0.0:
             head_vz = (head - (self._prev_head_z if self._prev_head_z is not None else head)) / 0.02
             if torso < 0.7 and head_vz > 0.05:
                 arm_push = self._arm_coef * min(self._arm_force_ratio(), 1.5)
         self._prev_head_z = head
-        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen + sv + arm_push
+        reward = record + dense + sr_dense + settle + bonus - speed_pen - air_pen + sv + arm_push + arrival
 
-        info["reward_breakdown"] = {"head_record": record, "ground_height": dense, "arm_push": arm_push}
+        info["reward_breakdown"] = {"head_record": record, "ground_height": dense, "arm_push": arm_push, "arrival": arrival}
         if self._settled or self._standready:
             info["reward_breakdown"]["settle"] = settle
         if self._standready:

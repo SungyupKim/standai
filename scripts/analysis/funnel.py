@@ -4,7 +4,7 @@
   stood       was upright (torso >= 0.95 m, |pitch| < 30 deg) for 25 steps in a row at some time / at 10 s / at 20 s
   falls       times the stand policy lost the torso below FALL_HEIGHT and control went back to the floor policy (mean per start)
   end state   standing | never reached the region | reached but ended down | stood once but ended down
-Usage: STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/funnel.py [--stand CKPT] [--ho-prone CKPT] [--ho-supine CKPT] [--n 100] [--seed0 7000] [--level 0.7]"""
+Usage: STANDAI_NO_RECOVERY_GATE=1 .venv/bin/python -I scripts/analysis/funnel.py [--stand CKPT] [--supine CKPT] [--prone CKPT] [--ho-prone CKPT] [--ho-supine CKPT] [--n 100] [--seed0 7000] [--level 0.7]"""
 import argparse, os, sys
 from concurrent.futures import ProcessPoolExecutor
 ROOT = "/home/ubuntu/workspace/standai/"
@@ -37,12 +37,13 @@ def run_side(side, stand, supine, prone, ho, n, seed0, level):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stand", default=ROOT + "checkpoints/best_stand_v55b.zip")
+    ap.add_argument("--supine", default=None); ap.add_argument("--prone", default=None)
     ap.add_argument("--ho-prone", default=None); ap.add_argument("--ho-supine", default=None)
     ap.add_argument("--n", type=int, default=100); ap.add_argument("--seed0", type=int, default=7000); ap.add_argument("--level", type=float, default=0.7)
     a = ap.parse_args()
     import benchmark as B
     with ProcessPoolExecutor(max_workers=4) as ex:
-        futs = [ex.submit(run_side, s, a.stand, B.DEFAULTS["supine"], B.DEFAULTS["prone"], h, a.n, a.seed0, a.level)
+        futs = [ex.submit(run_side, s, a.stand, a.supine or B.DEFAULTS["supine"], a.prone or B.DEFAULTS["prone"], h, a.n, a.seed0, a.level)
                 for s, h in (("supine", a.ho_supine), ("prone", a.ho_prone))]
         res = dict(f.result() for f in futs)
     for side, R in res.items():
