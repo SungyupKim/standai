@@ -34,7 +34,7 @@ SCENE_OPT = mujoco.MjvOption()
 SCENE_OPT.geomgroup[5] = 0      # hidden group: the parked opponent
 CLEAN_ONLY = True      # pick only runs that never fell on the way (see run())
 CLEAN_BY = 8.0         # seconds: must be standing by then
-MODE_LABEL = {"floor": ("Floor policy", (255, 200, 80)), "handover": ("Hand-over policy", (120, 200, 255)), "stand": ("Stand policy", (120, 230, 140))}
+MODE_LABEL = {"student": ("Single network", (255, 160, 220)), "floor": ("Floor policy", (255, 200, 80)), "handover": ("Hand-over policy", (120, 200, 255)), "stand": ("Stand policy", (120, 230, 140))}
 
 
 def font(size):
@@ -53,10 +53,32 @@ def hide_opponent(model):
             model.geom_rgba[g, 3] = 0.0
 
 
+class StudentCtl:
+    """Stands in for GetUpController when ONE end-to-end network drives everything (--student)."""
+    mode = "student"; falls = 0; ho_fail = 0; handovers = 0
+    pitch = staticmethod(GetUpController.pitch)
+
+    def __init__(self, path):
+        from stable_baselines3 import PPO
+        self.model = PPO.load(path, device="cpu")
+
+    def reset(self, env):
+        pass
+
+    def act(self, obs, env=None):
+        return self.model.predict(obs, deterministic=True)[0]
+
+    def observe(self, env, info):
+        pass
+
+
+STUDENT = None
+
+
 def make(side):
     env = FloorEnv(standready=True, level=0.7, crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
-    ctl = GetUpController(SUPINE, PRONE, STAND, fall_back=True, handover_ckpt=HANDOVER, handover_sides=("prone",))
+    ctl = StudentCtl(STUDENT) if STUDENT else GetUpController(SUPINE, PRONE, STAND, fall_back=True, handover_ckpt=HANDOVER, handover_sides=("prone",))
     return env, ctl
 
 
@@ -108,10 +130,12 @@ def main():
     ap.add_argument("--seed0", type=int, default=31000)
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets", "demo"))
+    ap.add_argument("--student", default=None, help="end-to-end single-network zip (train_getup.py / distill_controller.py) instead of the rule-based controller")
     ap.add_argument("--any-success", action="store_true", help="also allow runs that fell and got up again on the way")
     ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~73% stand after 20 s (fresh seeds).")
     a = ap.parse_args()
-    global CLEAN_ONLY
+    global CLEAN_ONLY, STUDENT
+    STUDENT = a.student
     CLEAN_ONLY = not a.any_success
 
     steps20 = int(20.0 / (0.005 * FRAME_SKIP))
