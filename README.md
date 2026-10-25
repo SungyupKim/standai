@@ -4,14 +4,15 @@ A 2D MuJoCo ragdoll biped that learns, with PPO (Stable-Baselines3), to get up f
 
 Technical details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English, condensed), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history). Working notes for resuming the project: [`CLAUDE.md`](CLAUDE.md).
 
-> ## Result: about **73%** of lying starts are standing 20 s later (from 0/160 at the start of the project)
+> ## Result: one network gets up from lying on the back or face down and is still standing 20 s later in **about 94%** of starts (from 0/160 at the start of the project)
 >
-> Fresh seed sets, 1200 starts per side over six sets (71-75% per set): **supine start 61.8%, prone start 84.4%, 50:50 average 73.1%**. A rule-based controller chains four PPO policies (supine floor, prone floor, a hand-over policy on the prone side, stand policy); the same behaviour distilled into **one** 512x512 network scores 74.5% vs 73.8% for the rules on the same seeds (docs 3.24 addendum 13).
-> Caveats: simulation only, 2D; the 50:50 supine/prone mix is an assumption; +-2.5 points sampling error, +-4-5 points between seed sets and between runs of the same seeds; 1.2% of prone starts are not lying down (start resampling gives up after 30 tries, ~+0.2 points, not corrected). Until 2026-10-25 the evaluation also applied the prone hand-over policy to supine arrivals, so older figures of ~65-68% were ~3 points too low.
+> Fresh seed sets, 600 starts per side: **supine start 97.7%, prone start 90.7%, 50:50 average 94.2%** (5 s of uninterrupted standing at the end: 97.0% / 90.0%); the rule-based controller of four PPO policies that it was distilled from stands in 70.8% on the same seeds (supine 63.0%, prone 78.7%). Training recipe: build the pieces with their own rewards and curricula, distil the whole controller (switching rules included) into ONE 512x512 network with DAgger, then fine-tune it end to end with a 20 s "standing" reward (docs 3.24 addendum 13).
+> Checks against shortcuts (all on fresh seeds): no use of the unphysical `root_x`/`root_ry` thrust (applied control is 0), standing unchanged when the parked opponent body is moved 40 m away, 5 s of calm standing (torso height std 0.009 m), and the stand is not knocked over by 150-500 N pushes (supine 94% -> 93%, prone 88% -> 88%).
+> Caveats: simulation only, 2D; starts come from the environment's own lying-start generator, so generalisation to other start poses is untested; the 50:50 supine/prone mix is an assumption; +-2.5 points sampling error; 1.2% of prone starts are not lying down (start resampling gives up after 30 tries, ~+0.2 points, not corrected). Until 2026-10-25 the evaluation also applied the prone hand-over policy to supine arrivals, so older figures of ~65-68% for the rule-based system were ~3 points too low.
 
 ![Demo: selected successful runs of the whole system in simulation](assets/demo.gif)
 
-*Four selected successful runs (two supine, two prone starts; no fall or sit-back on the way). They are picked, not typical: about 62% of supine and 84% of prone starts end standing. Higher quality: [`assets/demo.mp4`](assets/demo.mp4); regenerate headless with `python scripts/render_demo.py`.*
+*Four selected runs of the single network (two supine, two prone starts; no fall or sit-back on the way). They are picked, not typical: about 98% of supine and 91% of prone starts end standing. Higher quality: [`assets/demo.mp4`](assets/demo.mp4); regenerate headless with `python scripts/render_demo.py --student checkpoints/best_getup_e2e1.zip --seed0 98100`.*
 
 ## How it works
 
@@ -33,9 +34,9 @@ What moved the 50:50 number (every step with its failures is in the docs):
 | 10-19 | hand-over policy on the prone side | ~62% |
 | 10-22 | stand and supine floor policy distilled into 256x256 nets, fine-tuned | ~65% (as measured then) |
 | 10-24 | supine floor policy rewarded for the quality of its arrival (COM forward speed, low pitch) | +4 points |
-| 10-25 | evaluation corrected; whole controller distilled into one network | **~73%** |
+| 10-25 | evaluation corrected (rule-based system ~71-73%); whole controller distilled into one network, then PPO end to end | rules ~72% -> **one network ~94%** |
 
-What did not move it (fresh seeds; several looked promising in a training log): more floor training that raises the reach rate 13 points (+3 points of standing), re-training the stand policy on the new arrivals, supine hand-over policies, delaying the hand-over by a learned or hand-made score, a critic value or the stand policy's real catch outcome as floor reward, stronger arrival rewards. Open problems: the supine side (16% of starts never reach the region, about a third of the arrivals fall back within a second) and whether end-to-end PPO on the single network beats the rules (running, see `CLAUDE.md`).
+What did not move it (fresh seeds; several looked promising in a training log): more floor training that raises the reach rate 13 points (+3 points of standing), re-training the stand policy on the new arrivals, supine hand-over policies, delaying the hand-over by a learned or hand-made score, a critic value or the stand policy's real catch outcome as floor reward, stronger arrival rewards. Open problems: generalisation of the single network to other start poses and bodies, how small it can be (a size ablation 256/128/64 is running, see `CLAUDE.md`), and whether it also works from scratch at a large size (expected not: big networks trained from scratch failed on the floor policies).
 
 Limits: 2D sagittal-plane model, limb torque x1.5 without scaling link masses (`BODY_GEAR_SCALE`), ~1B steps in total (get-up papers use ~5B). Much of the code and analysis was written in a pair-programming loop with Claude (an AI assistant); experiment design decisions and review were the repository owner's.
 
