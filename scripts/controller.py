@@ -65,6 +65,28 @@ class GetUpController:
         self.vx_gate = float(_g) if _g else None
         self.vx_wait = int(os.environ.get("STANDAI_VX_WAIT", "50"))
         self._vx_waited, self._com_prev, self._vx, self.vx_forced = 0, None, 0.0, 0
+        # diagnostic (docs 3.24 addendum 12): hand over only when a learned catchability score of the arrival state (checkpoints/arrival_clf.pt, scripts/analysis/train_arrival_clf.py) is >= STANDAI_CLF_GATE,
+        # waiting at most STANDAI_CLF_WAIT steps; set per command with `env`, never export
+        _c = os.environ.get("STANDAI_CLF_GATE")
+        self.clf_gate = float(_c) if _c else None
+        self.clf_wait = int(os.environ.get("STANDAI_CLF_WAIT", "50"))
+        self._clf_waited, self.clf_forced, self._clf = 0, 0, None
+        if self.clf_gate is not None:
+            import torch
+            ck = torch.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints", "arrival_clf.pt"))
+            self._clf = []
+            for st in ck["states"]:
+                n = torch.nn.Sequential(torch.nn.Linear(33, 64), torch.nn.Tanh(), torch.nn.Linear(64, 64), torch.nn.Tanh(), torch.nn.Linear(64, 1)); n.load_state_dict(st); self._clf.append(n)
+            self._clf_mu, self._clf_sd = ck["mu"], ck["sd"]
+
+    def catch_score(self, env):
+        """Mean over the classifier ensemble of P(stand policy catches this state) for the current body state."""
+        import torch
+        d = env.data
+        x = torch.tensor(np.concatenate([d.qpos[1:17], d.qvel[0:17]]), dtype=torch.float32)[None]
+        x = (x - self._clf_mu) / self._clf_sd
+        with torch.no_grad():
+            return float(np.mean([torch.sigmoid(n(x))[0, 0].item() for n in self._clf]))
 
     @staticmethod
     def pitch(env):
@@ -80,6 +102,7 @@ class GetUpController:
         self.mode, self.handovers, self.falls = "floor", 0, 0
         self._waited, self.forced = 0, 0
         self._vx_waited, self._com_prev, self._vx, self.vx_forced = 0, None, 0.0, 0
+        self._clf_waited = 0
         self._ho_steps = self._ho_hold = self.ho_success = self.ho_fail = 0
         self._arrived, self._arrive_wait, self.v_forced = False, 0, 0
         self._floor_steps, self._flipped = 0, False
@@ -95,6 +118,11 @@ class GetUpController:
         return com_x - max(fx), abs(fz[0] - fz[1])
 
     def _may_hand_over(self, env):
+        if self.clf_gate is not None and self.catch_score(env) < self.clf_gate:
+            self._clf_waited += 1
+            if self._clf_waited < self.clf_wait:
+                return False
+            self.clf_forced += 1
         if self.vx_gate is not None and self._vx < self.vx_gate:
             self._vx_waited += 1
             if self._vx_waited < self.vx_wait:
@@ -156,6 +184,7 @@ class GetUpController:
                 self.handovers += 1
                 self._waited = 0
                 self._vx_waited = 0
+                self._clf_waited = 0
                 self._ho_steps = self._ho_hold = 0
             elif z < FALL_HEIGHT:
                 self._select_floor(env)        # re-pick by the current pitch sign while the body is down
