@@ -1,86 +1,43 @@
 # standai
 
-A 2D MuJoCo ragdoll biped learning to stand up and hold it, from an arbitrary starting posture,
-via PPO (Stable-Baselines3). Split out of [`fightai`](../fightai) — the combat self-play league
-this body was originally built for — once the standing problem turned out to need its own
-rigorous track rather than being a side quest.
+A 2D MuJoCo ragdoll biped that learns, with PPO (Stable-Baselines3), to get up from lying on its back or face down and stay standing. Split out of [`fightai`](../fightai), the combat self-play league this body was built for, once standing turned out to need its own rigorous track.
 
-전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
-축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
+Technical details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English, condensed), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history). Working notes for resuming the project: [`CLAUDE.md`](CLAUDE.md).
 
-> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 73%** of starts
+> ## Result: about **73%** of lying starts are standing 20 s later (from 0/160 at the start of the project)
 >
-> A rule-based controller chains four PPO-trained policies (supine floor policy, prone floor policy, a hand-over policy on the prone side, stand policy). The supine floor policy and the stand policy are 256x256 nets distilled from the earlier 64x64 policies and fine-tuned; the supine floor policy was additionally trained with a continuous *arrival-quality* reward (`checkpoints/best_floor_supine_fdist.zip`, `best_prone8.zip`, `best_stand_big1.zip`, `best_handover_prone.zip`, hand-over region level 0.7).
-> **~73%** standing after 20 s on fresh seed sets (1200 starts per side over six sets, 71-75% per set): supine start 61.8%, prone start 84.4%, 50:50 average 73.1%. (Until 2026-10-25 the evaluation also applied the prone hand-over policy to supine arrivals, which made the supine side and the whole system ~3 points too low: earlier figures of ~65-68% in the history below were measured that way.) At the start of the project this was **0/160**.
-> Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); +-2.5 points from sampling, about +-4-5 points between seed sets and between runs of the same seeds, and the seed sets that were used to choose between candidate policies are slightly optimistic, and 1.2% of prone starts are not lying down (the start resampling gives up after 30 tries; ~+0.2 points on the prone side, not corrected). The supine side is the bottleneck (16% of starts never reach the hand-over region and about a third of those that do fall back within a second, docs 3.24 addendum 10). Reproduce: `.venv/bin/python -I scripts/analysis/controller_side_eval.py --supine checkpoints/best_floor_supine_fdist.zip --prone checkpoints/best_prone8.zip --stand checkpoints/best_stand_big1.zip --handover checkpoints/best_handover_prone.zip --sides supine prone --levels 0.7 --n 200 --seed0 63000` (a shell that exports training variables such as `STANDAI_NO_RECOVERY_GATE` or `STANDAI_HARSH_MIN_TORSO` contaminates the result: use `env -u` / `env VAR=...`).
+> Fresh seed sets, 1200 starts per side over six sets (71-75% per set): **supine start 61.8%, prone start 84.4%, 50:50 average 73.1%**. A rule-based controller chains four PPO policies (supine floor, prone floor, a hand-over policy on the prone side, stand policy); the same behaviour distilled into **one** 512x512 network scores 74.5% vs 73.8% for the rules on the same seeds (docs 3.24 addendum 13).
+> Caveats: simulation only, 2D; the 50:50 supine/prone mix is an assumption; +-2.5 points sampling error, +-4-5 points between seed sets and between runs of the same seeds; 1.2% of prone starts are not lying down (start resampling gives up after 30 tries, ~+0.2 points, not corrected). Until 2026-10-25 the evaluation also applied the prone hand-over policy to supine arrivals, so older figures of ~65-68% were ~3 points too low.
 
-![Demo: selected successful runs of the whole system in simulation (supine and prone starts)](assets/demo.gif)
+![Demo: selected successful runs of the whole system in simulation](assets/demo.gif)
 
-*Four selected successful runs (two supine, two prone starts) of the whole system: floor policy -> hand-over policy (prone side) -> stand policy (the current 256x256 system: `best_floor_supine_fdist`, `best_prone8`, `best_stand_big1`, `best_handover_prone`). They are picked from seeds that end standing without ever falling on the way (some other starts stand, fall and get up again, or never get up); the overall rate is ~68% (supine ~53-58%, prone ~80-86%, fresh seed sets of 200-1600 starts per side), so most other starts end differently. Higher quality: [`assets/demo.mp4`](assets/demo.mp4). Regenerate (headless, no display needed): `python scripts/render_demo.py`.*
+*Four selected successful runs (two supine, two prone starts; no fall or sit-back on the way). They are picked, not typical: about 62% of supine and 84% of prone starts end standing. Higher quality: [`assets/demo.mp4`](assets/demo.mp4); regenerate headless with `python scripts/render_demo.py`.*
 
-## Current status (2026-10-25)
+## How it works
 
-The problem is split into **four policies and a rule-based controller** (`scripts/controller.py`, `GetUpController`); the single stand policy never learned to get off the floor (0/160 genuine uprights from starts below 0.6 m). The sign of the initial torso pitch (observable) picks the supine or prone floor policy; the floor policy hands over once the body is in the *hand-over region* (foot down, head >= 0.9 m, torso >= 0.6 m, slow; strictness level 0.7); on the prone side a hand-over policy sits in between; the stand policy then holds the stand, and if it falls (torso < 0.45 m) control goes back to the floor policy. **`scripts/analysis/benchmark.py` and `controller_side_eval.py` measure the whole system per start side.**
+The sign of the initial torso pitch picks the supine or prone **floor policy**; when the body reaches the *hand-over region* (foot down, head >= 0.9 m, torso >= 0.6 m, slow; strictness level 0.7) control passes to the **stand policy** (on the prone side via a **hand-over policy**); if the stand policy falls (torso < 0.45 m) the floor policy takes over again. One network could not learn to get off the floor (0/160 genuine uprights from starts below 0.6 m); a fresh network trained on floor starts only did.
 
-| Policy | Job | State |
+| Policy | Job | Checkpoint |
 |---|---|---|
-| **Supine floor** (`train_floor.py`, `FloorEnv`, `best_floor_supine_fdist.zip`, 256x256) | lying on the back -> hand-over region | distilled from the 64x64 `v12`, +40M and +100M PPO steps, then +40M with the arrival-quality reward; reaches the region from ~84% of starts |
-| **Prone floor** (`best_prone8.zip`, 64x64) | lying face down -> hand-over region | reaches the region from ~90% of starts |
-| **Hand-over policy, prone side** (`train_handover.py`, `best_handover_prone.zip`) | from the prone arrival to a stand-ready, balanced state | warm-started from the stand policy, trained on arrivals ordered by how far the centre of mass is ahead of the front foot; prone 20 s standing 70% -> 83% |
-| **Stand policy** (`train_locomotion.py`, `best_stand_big1.zip`, 256x256) | hold the stand from what the others hand over | distilled from the 64x64 `v55b` and fine-tuned at low learning rate (5e-5, `--target-kl`) |
+| Supine floor (`train_floor.py`, 256x256) | lying on the back -> hand-over region; trained with a continuous *arrival-quality* reward | `best_floor_supine_fdist.zip` |
+| Prone floor (64x64) | lying face down -> hand-over region | `best_prone8.zip` |
+| Hand-over, prone side (`train_handover.py`) | prone arrival -> stand-ready, balanced state | `best_handover_prone.zip` |
+| Stand (`train_locomotion.py`, 256x256) | hold the stand from what the others hand over | `best_stand_big1.zip` |
 
-What moved the end-to-end number (controller, 20 s standing, 50:50 supine/prone; every step is documented with its failures in [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) 3.17-3.24 and [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md)):
+What moved the 50:50 number (every step with its failures is in the docs):
 
 | Date | Change | 50:50 |
 |---|---|---|
-| 10-17 | rule-based controller, stand policy `v37` | ~24% |
-| 10-18 | stand run at a low learning rate (the earlier runs were jumping by +-50 catches between checkpoints, not improving); hand-over region level 0.7 | ~50% |
-| 10-19 | separate hand-over policy on the prone side, stand policy `v55b` (COM-ahead ladder) | ~62.5% |
-| 10-22 | stand and supine floor policy distilled into 256x256 nets and fine-tuned (big nets from scratch always failed) | ~65% |
-| 10-23 | hand-over policy re-trained from the big stand policy | prone 83% |
-| 10-24 | supine floor policy paid for the *quality of its arrival* (COM forward speed, low pitch) | supine ~49% -> ~58%, ~68% (measured with the evaluation bug below) |
-| 10-25 | evaluation corrected (hand-over policy on prone arrivals only); the whole controller distilled into ONE 512x512 network (DAgger), same level as the rule-based system (74.5% vs 73.8%) | **~73%** |
+| 10-17 | rule-based controller | ~24% |
+| 10-18 | low PPO learning rate for the stand policy; hand-over region level 0.7 | ~50% |
+| 10-19 | hand-over policy on the prone side | ~62% |
+| 10-22 | stand and supine floor policy distilled into 256x256 nets, fine-tuned | ~65% (as measured then) |
+| 10-24 | supine floor policy rewarded for the quality of its arrival (COM forward speed, low pitch) | +4 points |
+| 10-25 | evaluation corrected; whole controller distilled into one network | **~73%** |
 
-What did not move it (all measured on fresh seeds, several of them looked promising in a training log): more floor training that raises the hand-over region reach rate by 13 points (+3 points of standing), re-training the stand policy on the new arrivals, three supine hand-over policies, delaying the hand-over until the centre of mass moves forward, stand-policy critic values as an auxiliary floor reward, stronger arrival rewards, and a reward from the stand policy's real catch outcome at the arrival. Reach rate is not a selection criterion for 20 s standing.
+What did not move it (fresh seeds; several looked promising in a training log): more floor training that raises the reach rate 13 points (+3 points of standing), re-training the stand policy on the new arrivals, supine hand-over policies, delaying the hand-over by a learned or hand-made score, a critic value or the stand policy's real catch outcome as floor reward, stronger arrival rewards. Open problems: the supine side (16% of starts never reach the region, about a third of the arrivals fall back within a second) and whether end-to-end PPO on the single network beats the rules (running, see `CLAUDE.md`).
 
-Open problems, in order of importance: (1) the supine side: 16% of starts never reach the region, and about a third of the arrivals fall back within a second (the arrivals that stand carry a forward COM speed of ~+0.6 m/s, the others ~+0.3 m/s or 0, and fall backwards); (2) the rule-based switching could be replaced by one network (distil the controller, then fine-tune end to end; not tried); (3) crouched starts remain the stand policy's weak spot.
-
-A measurement trap that recurs: the trainer's `fall_rate` and `ep_len_mean` are optimistic or unrelated to the gate; judge with fixed seeds per start side. The same seeds move by +-4 points between runs and 46-62% between seed sets on the supine side, so small differences need 600+ starts and a paired comparison.
-
-What the investigation found (details, numbers and failures: [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md)):
-
-1. **The low harsh score is "cannot get up", not a measurement artifact.** Of collapsed starts that
-   begin below the fall height, ~0-3% end up standing within the environment's 5 s window.
-2. **The body can get up, but with little torque margin.** A closed-loop MPC oracle (exact simulator,
-   diagnostic only) stands from 2/6 lying starts at the original actuator gears, and 5/6 at x1.5.
-   An open-loop CEM search never did (it finds headstands and mid-air leaps). Hence the body spec
-   changed to **x1.5 maximum limb torque** (`BODY_GEAR_SCALE` in `locomotion_env.py`; set
-   `STANDAI_BODY_GEAR=1` to reproduce older numbers). Link masses were not scaled, so this is
-   slightly optimistic for real hardware. The floor policy confirms the torque point: 65% of its
-   deterministic actions sit at the +-1 limit.
-3. **Reward shaping, failed-start replay, correlated noise, bursts and a frontier-ladder reset archive
-   did not make the single policy get up from the floor** (policy-alone head > 0.5 m stayed at 4-8% of
-   floor starts, below random bang-bang patterns at 77%). A fresh network trained on floor starts only
-   did: 72% at 0.6M steps without bursts, whereas env-level bursts *hurt* it (20% at 1.3M steps).
-   Getting to the *stand-ready* region (not just head height) needed the right target: staged targets
-   (loose -> strict) worked on top of a network that already knew how to get high, and failed from scratch.
-4. Measurement lessons: training-log metrics disagree with the deterministic gate; torso-height-only
-   objectives get exploited (inverted/airborne poses); 100-seed gates are too noisy for single
-   comparisons; **a "success" has to be checked by what happens next** -- the floor policy's first
-   success definition (head >= 0.9 m once) turned out to be a pop-up the same policy could not hold,
-   and the check that "proved" it continued the *wrong* policy (the stand policy takes over after
-   hand-off). Both errors are written up in the experiments doc.
-
-Earlier history: for most of this track the real gate sat at a flat **0%** while training-log metrics
-kept looking better; two silent measurement bugs (a stale module-level override, and a viewer that
-never passed `stand_only=True`) and a restart from scratch (`v21`) ended that. The physical capability
-of *holding* a stand was never in question (a `qfrc_bias` measurement shows it costs 1-5% of each
-joint's maximum output).
-
-Limits to keep in mind: 2D sagittal-plane model, limb torque raised to x1.5 without scaling link
-masses, and ~100M steps of training (get-up papers use ~5B). Much of the code and analysis was written
-in a pair-programming loop with Claude (an AI assistant); experiment design decisions and review were
-the repository owner's.
+Limits: 2D sagittal-plane model, limb torque x1.5 without scaling link masses (`BODY_GEAR_SCALE`), ~1B steps in total (get-up papers use ~5B). Much of the code and analysis was written in a pair-programming loop with Claude (an AI assistant); experiment design decisions and review were the repository owner's.
 
 ## Setup
 
@@ -88,106 +45,52 @@ the repository owner's.
 python -m venv .venv
 .venv/bin/pip install mujoco gymnasium stable-baselines3 tensorboard
 ```
-
-`watch_locomotion.py` needs a machine with an OpenGL context. Training itself runs headless.
-
-## Project layout
-
-```
-models/fighter2d.xml          Generated MJCF model (build_model.py builds it — copied from fightai)
-scripts/build_model.py        Model generator (copied from fightai, shared body definition)
-scripts/env.py                Fighter2DEnv base class (copied from fightai; LocomotionEnv subclasses it)
-scripts/locomotion_env.py     LocomotionEnv: the stand/recover environment (stand_only mode)
-scripts/train_locomotion.py   PPO training entrypoint, performance-gated curriculum
-scripts/watch_locomotion.py   Interactive MuJoCo viewer for a trained checkpoint
-scripts/floor_env.py          FloorEnv: lying starts only; targets: loose hand-off / stand-ready region (standready), staged level 0..1,
-                              prone-only starts (prone_frac), optional COM condition (com_max), 5 s KO rule off (down_timeout)
-scripts/train_floor.py        PPO entrypoint for the floor get-up policies (--prone-frac, --level-start, --no-down-timeout, --max-steps, ...)
-scripts/floor_progress_notify.py  KakaoTalk pings: policy-alone eval, split by start side, stand policy taking over for 3 s
-scripts/watch_floor.py        Viewer for the floor policy (--stand <ckpt> hands over, --only-success --skip-replay shows only the catch,
-                              --lying-only --prone-frac 1.0 prone starts only)
-scripts/make_handoff_pool.py / make_strict_pool.py  collect hand-off states (--supine-only, --level) for training the stand / hand-over policies
-scripts/controller.py         GetUpController: rule-based combination of the supine / prone floor policies, the prone-side hand-over policy and the stand policy
-                              (opt-in diagnostics: STANDAI_VX_GATE hand-over delay; scripts/analysis/controller_side_eval.py, funnel.py, benchmark.py)
-scripts/handover_env.py / train_handover.py  hand-over policy environment and trainer (warm start from the stand policy; arrival ladder)
-scripts/distill_stand.py / distill_floor.py  behaviour cloning + value regression + DAgger: 64x64 policy -> 256x256, then PPO fine-tune
-scripts/floor_trend_notify.py / heartbeat.py KakaoTalk progress for floor runs (reach rate, arrival speed/pitch, catch rate) / 30-minute pipeline heartbeat
-scripts/render_demo.py        headless demo video of the current system (assets/demo.mp4/gif; picks clean successful runs)
-scripts/overnight_*.sh        unattended pipelines (distill -> fine-tune -> scan -> controller comparison -> Kakao message)
-scripts/analysis/             benchmark / controller_side_eval / funnel / supine_fall_diag (state at the hand-over by outcome) / catch_by_com / floor_ckpt_scan ...
-scripts/stand_progress_notify.py  Periodic KakaoTalk progress pings with a real fixed-seed gate
-scripts/kakao_notify.py       Shared KakaoTalk notify helper (copied from fightai)
-checkpoints/                  Trained models, autosaves, logs (gitignored)
-docs/                         Technical documentation (Korean full history + English summary)
-docs/experiments_2026-10-11.md  Why harsh won't learn: measurements, negative results, MPC oracle, gear findings
-scripts/analysis/             Diagnostics behind that doc (gates, MPC oracle, reward-by-height, gear sweep)
-```
-
-`build_model.py`/`env.py` are copies of fightai's versions, not a shared dependency — if the body
-definition changes, both repos need the change applied by hand. See fightai's README for why this
-split was done by copy rather than a shared submodule.
+Viewers need an OpenGL context (`DISPLAY=:1` on this machine); training and `render_demo.py` run headless.
 
 ## Running things
 
-**The whole system (viewer and benchmark):**
 ```bash
+# watch the whole system, then measure it (paired, fixed seeds, per start side)
 DISPLAY=:1 .venv/bin/python scripts/watch_controller.py --side alternate --level 0.7 \
   --supine checkpoints/best_floor_supine_fdist.zip --prone checkpoints/best_prone8.zip \
   --stand checkpoints/best_stand_big1.zip --handover checkpoints/best_handover_prone.zip
 env -u STANDAI_NO_RECOVERY_GATE .venv/bin/python -I scripts/analysis/controller_side_eval.py --n 200 --seed0 63000 \
   --supine checkpoints/best_floor_supine_fdist.zip --prone checkpoints/best_prone8.zip --stand checkpoints/best_stand_big1.zip \
   --handover checkpoints/best_handover_prone.zip --sides supine prone --levels 0.7
-```
 
-**Training (learn to stand from any posture):**
-```bash
-cd scripts
-../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 80000000 --stand-only --out my_stand
+# the single network and its end-to-end fine-tune
+.venv/bin/python scripts/distill_controller.py            # DAgger from the rule-based controller
+.venv/bin/python scripts/train_getup.py --init-from checkpoints/getup_student_distilled.zip --out e2e1
+.venv/bin/python -I scripts/analysis/getup_eval.py --arms teacher checkpoints/getup_student_distilled.zip --sets 91000 92000
 ```
+A shell that exports training variables (`STANDAI_NO_RECOVERY_GATE`, `STANDAI_HARSH_MIN_TORSO`, ...) contaminates measurements: pass them per command with `env VAR=... cmd` and measure with `env -u`.
 
-**Resuming from a checkpoint:**
-```bash
-../.venv/bin/python train_locomotion.py --n-envs 8 --timesteps 80000000 --stand-only \
-  --out my_stand --init-from ../checkpoints/autosave/my_stand_..._steps.zip
-```
+## Project layout
 
-**Watching a trained policy:**
-```bash
-DISPLAY=:1 ../.venv/bin/python watch_locomotion.py ../checkpoints/autosave/my_stand_..._steps.zip
 ```
-
-**Training the prone floor policy (staged target, warm start, strict region, lying face-down only):**
-```bash
-cd scripts
-../.venv/bin/python train_floor.py --n-envs 8 --timesteps 150000000 --out ppo_floor_prone8 --floor-burst-rate 0.0 \
-  --standready --crouch-frac 0.0 --max-steps 450 --prone-frac 1.0 --no-down-timeout --speed-pen 0.0 --air-pen 0.0 \
-  --learning-rate 5e-5 --init-from ../checkpoints/best_prone8.zip
-# staged target: add --level-start 0.0 --level-gate 0.35 --level-step 0.05 (needs a network that can already get high; see docs)
+models/fighter2d.xml          Generated MJCF model (scripts/build_model.py, copied from fightai)
+scripts/env.py                Fighter2DEnv base class (copied from fightai)
+scripts/locomotion_env.py     LocomotionEnv: stand / recover environment; train_locomotion.py trains the stand policy
+scripts/floor_env.py          FloorEnv: lying starts, hand-over region (level), arrival rewards; train_floor.py trains the floor policies
+scripts/handover_env.py       hand-over policy environment; train_handover.py trains it
+scripts/controller.py         GetUpController: rule-based combination of the four policies (opt-in diagnostics for hand-over gates)
+scripts/getup_env.py          GetUpEnv: the whole task as one 20 s environment; distill_controller.py / train_getup.py: single-network distillation and PPO
+scripts/distill_stand.py, distill_floor.py   64x64 -> 256x256 distillation (behaviour cloning + value regression + DAgger)
+scripts/analysis/             benchmark, controller_side_eval, funnel, supine_fall_diag, arrival_classifier, getup_eval, ... (diagnostics behind the docs)
+scripts/*_notify.py, heartbeat.py, overnight_*.sh   unattended pipelines with KakaoTalk progress messages
+scripts/render_demo.py        headless demo video (assets/)
+checkpoints/                  trained models, autosaves, logs (gitignored)
+docs/                         technical documentation (English summary, Korean experiment log and full history)
 ```
-
-**Progress notifications (KakaoTalk, every 30 min, includes a real fixed-seed gate measurement):**
-```bash
-nohup ../.venv/bin/python stand_progress_notify.py \
-  --log ../checkpoints/locomotion_train_my_stand.log \
-  --ckpt-glob '../checkpoints/autosave/my_stand_*_steps.zip' \
-  --total-timesteps 80000000 --interval-minutes 30 &
-```
+`build_model.py`, `env.py`, `view.py` and `kakao_notify.py` are copies of fightai's versions, not a shared dependency: a body change needs the same edit in both repos.
 
 ## Methodology note
 
-The single most important lesson carried over from fightai: SB3's own training-log metrics
-(`fall_rate`, `ep_len_mean`, etc.) are measured under stochastic rollout over long episodes and can
-look good or bad independently of what actually matters — whether the policy, acting
-deterministically from a fresh reset, stays upright for a full 3 seconds. Every progress check in
-this repo re-measures that directly (`stand_progress_notify.py`'s `gate_survival_rate*` functions)
-rather than trusting the log.
+SB3's training-log metrics (`fall_rate`, `ep_len_mean`, ...) are measured under stochastic rollouts and can move opposite to what matters, so every claim here is re-measured deterministically on fixed seeds per start side, compared on the same seeds, and given an error bar. The same seeds move +-4 points between runs and whole seed sets 4-5 points, so differences below ~3 points need 600+ paired starts. Recorded evaluation mistakes (leaked environment variables, a hand-over policy applied to the wrong side, starts that were not lying down) are listed in `CLAUDE.md` and the docs.
 
 ## Roadmap
 
-Standing (from any posture, held reliably) → walking (reintroducing velocity tracking) → transplant
-the resulting policy back into fightai's combat action/observation space via
-`transplant_locomotion.py` (still in fightai) — each stage gated on the previous one actually
-working.
+Standing from any posture, held reliably -> walking (velocity tracking) -> transplant the policy into fightai's combat action/observation space (`transplant_locomotion.py`, still in fightai), each stage gated on the previous one actually working.
 
 ## License
 
