@@ -105,7 +105,9 @@ def task_floor(side, floor, stand, n):
     return dict(n=n, reached=reached, held=held)
 
 
-def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None, v_gate=None, flip=0, forever=False, sample=False):
+def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None, seed0=None, v_gate=None, flip=0, forever=False, sample=False, ho_sides=None):
+    # ho_sides: which floor side's arrivals go through the hand-over policy. None = LEGACY behaviour (the evaluated side itself, i.e. a prone-trained hand-over policy was also applied to supine arrivals until 2026-10-25,
+    # ~-5.5 points on the supine side); controller_side_eval.py now passes 'prone' by default (the intended system)
     _setup()
     import numpy as np
     from controller import GetUpController
@@ -113,7 +115,7 @@ def task_controller(supine, prone, stand, n, side=None, level=1.0, handover=None
     # level < 0: the loose 'reach' target of the from-scratch stage-1 floor runs (head >= 0.9 m + a foot down, no stand-ready region) instead of the stand-ready region
     env = FloorEnv(standready=level >= 0, level=max(level, 0.0), crouch_frac=0.0, max_steps=10 ** 6, down_timeout=False,
                    prone_frac=1.0 if side == "prone" else 0.0, supine_frac=1.0 if side == "supine" else 0.0)
-    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(side,) if side else ("prone",), v_gate=v_gate, floor_flip=flip, handover_forever=forever, floor_sample=sample)
+    ctl = GetUpController(supine, prone, stand, fall_back=True, handover_ckpt=handover, handover_sides=(ho_sides,) if ho_sides else ((side,) if side else ("prone",)), v_gate=v_gate, floor_flip=flip, handover_forever=forever, floor_sample=sample)
     s10 = send = hand = 0
     T = 1000
     s0 = SEED0 if seed0 is None else seed0
@@ -155,9 +157,9 @@ def main():
             "stand_calm": ex.submit(task_stand_calm, a.stand, n_calm),
             "floor_supine": ex.submit(task_floor, "supine", a.supine, a.stand, n_floor),
             "floor_prone": ex.submit(task_floor, "prone", a.prone, a.stand, n_floor),
-            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl, None, a.handover_level, a.handover),
-            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine", a.handover_level, a.handover),
-            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone", a.handover_level, a.handover),
+            "controller": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl, None, a.handover_level, a.handover, None, None, 0, False, False, "prone"),
+            "controller_supine": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "supine", a.handover_level, a.handover, None, None, 0, False, False, "prone"),
+            "controller_prone": ex.submit(task_controller, a.supine, a.prone, a.stand, n_ctl // 2, "prone", a.handover_level, a.handover, None, None, 0, False, False, "prone"),
         }
         res = {k: f.result() for k, f in futs.items()}
     res["checkpoints"] = {k: os.path.basename(getattr(a, k)) for k in DEFAULTS}

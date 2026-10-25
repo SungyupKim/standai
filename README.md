@@ -8,10 +8,10 @@ rigorous track rather than being a side quest.
 전체 배경과 상세 히스토리(한국어)는 [`docs/stand_only_track.md`](docs/stand_only_track.md),
 축약된 영문 요약은 [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) 참고.
 
-> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 68%** of starts
+> ## Result: a ragdoll lying on the floor stands up and is still standing 20 s later in **about 73%** of starts
 >
 > A rule-based controller chains four PPO-trained policies (supine floor policy, prone floor policy, a hand-over policy on the prone side, stand policy). The supine floor policy and the stand policy are 256x256 nets distilled from the earlier 64x64 policies and fine-tuned; the supine floor policy was additionally trained with a continuous *arrival-quality* reward (`checkpoints/best_floor_supine_fdist.zip`, `best_prone8.zip`, `best_stand_big1.zip`, `best_handover_prone.zip`, hand-over region level 0.7).
-> **~68%** standing after 20 s on fresh seed sets: supine start ~53-58% (925/1600 = 57.8% over eight sets of 200 starts, 46-62% per set; 53% on one independent pair of sets), prone start ~83% (1327/1600 over eight sets, 79-87% per set); the 50:50 average is ~70% pooled and 66.6% on the one independent pair of sets. At the start of the project this was **0/160**.
+> **~73%** standing after 20 s on fresh seed sets (1200 starts per side over six sets, 71-75% per set): supine start 61.8%, prone start 84.4%, 50:50 average 73.1%. (Until 2026-10-25 the evaluation also applied the prone hand-over policy to supine arrivals, which made the supine side and the whole system ~3 points too low: earlier figures of ~65-68% in the history below were measured that way.) At the start of the project this was **0/160**.
 > Caveats: simulation only; the 50:50 supine/prone weighting is an assumption (the environment's own 80:20 split is an artefact of its collapse generator, docs 3.20); +-2.5 points from sampling, about +-4-5 points between seed sets and between runs of the same seeds, and the seed sets that were used to choose between candidate policies are slightly optimistic, and 1.2% of prone starts are not lying down (the start resampling gives up after 30 tries; ~+0.2 points on the prone side, not corrected). The supine side is the bottleneck (16% of starts never reach the hand-over region and about a third of those that do fall back within a second, docs 3.24 addendum 10). Reproduce: `.venv/bin/python -I scripts/analysis/controller_side_eval.py --supine checkpoints/best_floor_supine_fdist.zip --prone checkpoints/best_prone8.zip --stand checkpoints/best_stand_big1.zip --handover checkpoints/best_handover_prone.zip --sides supine prone --levels 0.7 --n 200 --seed0 63000` (a shell that exports training variables such as `STANDAI_NO_RECOVERY_GATE` or `STANDAI_HARSH_MIN_TORSO` contaminates the result: use `env -u` / `env VAR=...`).
 
 ![Demo: selected successful runs of the whole system in simulation (supine and prone starts)](assets/demo.gif)
@@ -38,7 +38,8 @@ What moved the end-to-end number (controller, 20 s standing, 50:50 supine/prone;
 | 10-19 | separate hand-over policy on the prone side, stand policy `v55b` (COM-ahead ladder) | ~62.5% |
 | 10-22 | stand and supine floor policy distilled into 256x256 nets and fine-tuned (big nets from scratch always failed) | ~65% |
 | 10-23 | hand-over policy re-trained from the big stand policy | prone 83% |
-| 10-24 | supine floor policy paid for the *quality of its arrival* (COM forward speed, low pitch) | supine ~49% -> ~58%, ~68% |
+| 10-24 | supine floor policy paid for the *quality of its arrival* (COM forward speed, low pitch) | supine ~49% -> ~58%, ~68% (measured with the evaluation bug below) |
+| 10-25 | evaluation corrected (hand-over policy on prone arrivals only); the whole controller distilled into ONE 512x512 network (DAgger), same level as the rule-based system (74.5% vs 73.8%) | **~73%** |
 
 What did not move it (all measured on fresh seeds, several of them looked promising in a training log): more floor training that raises the hand-over region reach rate by 13 points (+3 points of standing), re-training the stand policy on the new arrivals, three supine hand-over policies, delaying the hand-over until the centre of mass moves forward, stand-policy critic values as an auxiliary floor reward, stronger arrival rewards, and a reward from the stand policy's real catch outcome at the arrival. Reach rate is not a selection criterion for 20 s standing.
 
