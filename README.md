@@ -22,21 +22,24 @@ Details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English summa
 Network size barely matters (same recipe, 12M end-to-end steps, 50:50: 512x512 92%, 256x256 93%, 128x128 89%, 64x64 85% vs 72% for the rules). This is *not* evidence that one network trains from scratch: big networks trained from scratch on the floor task failed repeatedly, which is why the pieces come first. Things that did not move the rule-based system (reward stacking, re-training the stand policy, hand-over timing gates, supine hand-over policies, critic-based rewards) are in the docs.
 Limits: ~1B steps in total (get-up papers use ~5B), limb torque x1.5 without scaling link masses. Much of the code and analysis was written in a pair-programming loop with Claude (an AI assistant); experiment design decisions and review were the repository owner's.
 
-## Setup and use
+## Try it (1 minute, no checkpoints in git)
 
 ```bash
-python -m venv .venv && .venv/bin/pip install mujoco gymnasium stable-baselines3
-# measure the single network against the rule-based controller on the same fresh seeds
-env -u STANDAI_NO_RECOVERY_GATE .venv/bin/python -I scripts/analysis/getup_strict_eval.py --arms teacher checkpoints/best_getup_e2e1.zip --seed0 99100 --n 200
-# regenerate the demo (headless)
-.venv/bin/python scripts/render_demo.py --student checkpoints/best_getup_e2e1.zip --seed0 98100
+git clone https://github.com/SungyupKim/standai && cd standai
+python -m venv .venv && .venv/bin/pip install mujoco gymnasium stable-baselines3 huggingface_hub pillow
+.venv/bin/python scripts/demo_hf.py            # downloads the network from Hugging Face, runs 50 supine + 50 prone starts (~1.5 min)
+.venv/bin/python scripts/demo_hf.py --video    # also writes demo_hf.mp4 / .gif (needs ffmpeg)
 ```
-Checkpoints are on Hugging Face (link above), not in git. Viewers need an OpenGL display (`DISPLAY=:1` here). A shell that exports training variables (`STANDAI_*`) contaminates measurements: pass them per command with `env VAR=... cmd` and measure with `env -u`.
+Expect about 95% (supine) and 87-91% (prone) standing after 20 s; small samples are noisy. Other measurements (paired against the rule-based controller on the same seeds; checkpoints from the Hugging Face repo):
+```bash
+env -u STANDAI_NO_RECOVERY_GATE .venv/bin/python -I scripts/analysis/getup_strict_eval.py --arms teacher <path to getup_e2e_512.zip> --seed0 99100 --n 200
+```
+Viewers need an OpenGL display (`DISPLAY=:1` here). A shell that exports training variables (`STANDAI_*`) contaminates measurements: pass them per command with `env VAR=... cmd` and measure with `env -u`.
 
 ## Layout
 
 ```
-scripts/getup_env.py          GetUpEnv: the whole task as one 20 s environment; distill_controller.py, train_getup.py: distillation and PPO
+scripts/getup_env.py          GetUpEnv: the whole task as one 20 s environment; distill_controller.py, train_getup.py: distillation and PPO; demo_hf.py: quick start
 scripts/controller.py         GetUpController: the rule-based combination of the four policies (the teacher / baseline)
 scripts/floor_env.py, locomotion_env.py, handover_env.py   environments of the floor, stand and hand-over policies (train_floor.py, train_locomotion.py, train_handover.py)
 scripts/analysis/             measurements and diagnostics behind the docs (benchmark, getup_strict_eval, funnel, ...)
