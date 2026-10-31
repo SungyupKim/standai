@@ -2,7 +2,7 @@
 
 A 2D MuJoCo ragdoll biped that learns, with PPO (Stable-Baselines3), to get up from lying on its back or face down and stay standing. Split out of [`fightai`](../fightai), the combat self-play league this body was built for, once standing turned out to need its own rigorous track.
 
-Technical details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English, condensed), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history). Working notes for resuming the project: [`CLAUDE.md`](CLAUDE.md).
+Technical details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English, condensed), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history). Working notes for resuming the project: [`CLAUDE.md`](CLAUDE.md). **Trained checkpoints (the single network, size ablation, the four rule-based components): [huggingface.co/SungyupKim/standai-getup](https://huggingface.co/SungyupKim/standai-getup).**
 
 > ## Result: one network gets up from lying on the back or face down and is still standing 20 s later in **about 94%** of starts (from 0/160 at the start of the project)
 >
