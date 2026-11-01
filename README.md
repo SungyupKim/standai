@@ -28,7 +28,7 @@ Limits: ~1B steps in total (get-up papers use ~5B), limb torque x1.5 without sca
 
 ```bash
 git clone https://github.com/SungyupKim/standai && cd standai
-python -m venv .venv && .venv/bin/pip install mujoco gymnasium stable-baselines3 huggingface_hub pillow
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python scripts/demo_hf.py            # downloads the network from Hugging Face, runs 50 supine + 50 prone starts (~1.5 min)
 .venv/bin/python scripts/demo_hf.py --video    # also writes demo_hf.mp4 / .gif (needs ffmpeg)
 ```

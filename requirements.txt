@@ -1,0 +1,20 @@
+# standai: exact versions this repo was developed and measured with (Python 3.12, Linux).
+# Newer or older versions of these will probably work, but every number in the docs was produced with these.
+#
+#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# Not installable with pip: ffmpeg (only for scripts/render_demo.py / demo_hf.py --video) and, for the viewers
+# (watch_*.py), a machine with an OpenGL display. Training and rendering the demo video run headless.
+
+mujoco==3.15.0
+gymnasium==1.4.0
+stable-baselines3==2.9.0
+torch==2.14.1
+numpy==2.5.3
+
+# scripts/demo_hf.py (download the published checkpoints) and scripts/render_demo.py (frame overlays)
+huggingface_hub==2.4.0
+pillow==12.3.0
+
+# optional: SB3 tensorboard logging
+# tensorboard==2.21.0
