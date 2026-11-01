@@ -112,14 +112,15 @@ def overlay(img, side, mode, t, caption):
     im = Image.fromarray(img)
     d = ImageDraw.Draw(im)
     W, H = im.size
-    d.rectangle([0, 0, W, 34], fill=(0, 0, 0))
-    d.text((10, 6), f"{side.capitalize()} start ({'lying on the back' if side == 'supine' else 'lying face down'})", font=font(17), fill=(255, 255, 255))
-    d.text((W - 90, 8), f"{t:4.1f} s", font=font(16), fill=(220, 220, 220))
+    k = W / 640.0          # everything below is laid out for 640x360 and scaled with the frame
+    d.rectangle([0, 0, W, int(34 * k)], fill=(0, 0, 0))
+    d.text((int(10 * k), int(6 * k)), f"{side.capitalize()} start ({'lying on the back' if side == 'supine' else 'lying face down'})", font=font(int(17 * k)), fill=(255, 255, 255))
+    d.text((W - int(90 * k), int(8 * k)), f"{t:4.1f} s", font=font(int(16 * k)), fill=(220, 220, 220))
     label, col = MODE_LABEL[mode]
-    d.rectangle([10, 42, 10 + 12 + 10 * len(label), 70], fill=(0, 0, 0))
-    d.text((16, 46), label, font=font(17), fill=col)
-    d.rectangle([0, H - 24, W, H], fill=(0, 0, 0))
-    d.text((8, H - 21), caption, font=font(12), fill=(230, 230, 230))
+    d.rectangle([int(10 * k), int(42 * k), int((10 + 12 + 10 * len(label)) * k), int(70 * k)], fill=(0, 0, 0))
+    d.text((int(16 * k), int(46 * k)), label, font=font(int(17 * k)), fill=col)
+    d.rectangle([0, H - int(24 * k), W, H], fill=(0, 0, 0))
+    d.text((int(8 * k), H - int(21 * k)), caption, font=font(int(12 * k)), fill=(230, 230, 230))
     return np.asarray(im)
 
 
@@ -131,6 +132,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--out", default=os.path.join(HERE, "..", "assets", "demo"))
     ap.add_argument("--student", default=None, help="end-to-end single-network zip (train_getup.py / distill_controller.py) instead of the rule-based controller")
+    ap.add_argument("--scale", type=float, default=1.0, help="frame size relative to 640x360 (2 = 1280x720)")
+    ap.add_argument("--crf", type=int, default=24, help="x264 quality for the mp4 (lower = better; 16-18 is visually lossless)")
+    ap.add_argument("--gif-width", type=int, default=480)
     ap.add_argument("--any-success", action="store_true", help="also allow runs that fell and got up again on the way")
     ap.add_argument("--caption", default="Selected successful runs (simulation). Overall ~73% stand after 20 s (fresh seeds).")
     a = ap.parse_args()
@@ -166,7 +170,8 @@ def main():
     for side, seed in order:
         env, ctl = make(side)
         if renderer is None:
-            renderer = mujoco.Renderer(env.model, height=360, width=640)
+            env.model.vis.global_.offwidth, env.model.vis.global_.offheight = int(640 * a.scale), int(360 * a.scale)
+            renderer = mujoco.Renderer(env.model, height=int(360 * a.scale), width=int(640 * a.scale))
         hide_opponent(env.model)
         state = {"x": None}
 
@@ -186,8 +191,8 @@ def main():
         print(f"clip {side} seed {seed}: ends standing = {ok}, frames so far {n_frame}", flush=True)
     out = os.path.abspath(a.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "25", "-i", f"{tmp}/f%05d.png", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "24", out + ".mp4"], check=True)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "25", "-i", f"{tmp}/f%05d.png", "-vf", "fps=12,scale=480:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer:bayer_scale=4", out + ".gif"], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "25", "-i", f"{tmp}/f%05d.png", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(a.crf), "-preset", "slow", out + ".mp4"], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "25", "-i", f"{tmp}/f%05d.png", "-vf", f"fps=12,scale={a.gif_width}:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=bayer:bayer_scale=4", out + ".gif"], check=True)
     for ext in (".mp4", ".gif"):
         print(f"{out + ext}: {os.path.getsize(out + ext) / 1e6:.1f} MB", flush=True)
     subprocess.run(["rm", "-rf", tmp])
