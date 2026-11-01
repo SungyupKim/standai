@@ -55,3 +55,18 @@ stand policy `ppo_stand_v37_ladder_..._96000000_steps.zip`; edit the constants a
 `getup_cem.py` / `getup_mpc.py` replicate `env.step`'s stand-only physics in a light rollout
 (verified identical to `env.step`, max |dz| = 0.0000). The MPC is a *diagnostic*, not a teacher: it
 queries the exact simulator, so its success says what the body can do, not what a policy has learned.
+
+## Current tools (2026-10-22 .. 2026-10-27)
+
+| script | what it answers |
+|---|---|
+| `controller_side_eval.py` | whole rule-based system per start side on fixed seeds, with/without a hand-over policy (`--ho-sides prone` is the intended system; `side` = legacy bug behaviour) |
+| `getup_strict_eval.py --arms teacher <zip> ...` | single network vs the rule-based controller on the same fresh seeds: standing for the last 0.5 s / 2 s / 5 s, torso height std, joint speed |
+| `getup_eval.py` | paired benchmark-criterion evaluation (same seeds, several arms and sets) |
+| `opponent_removed_eval.py`, `push_eval.py` | shortcut checks: standing with the parked opponent moved away; recovery after a 0.1 s push (150-500 N) |
+| `funnel.py [--supine CKPT] [--prone CKPT]` | where the starts of the whole system are lost: never reached / reached but down / stood then down |
+| `supine_fall_diag.py` | the body state at the hand-over by outcome (stands vs does not), collapse timing |
+| `arrival_classifier.py`, `train_arrival_clf.py`, `arrival_push_diag.py` | catchability of an arrival state (MLP AUC 0.95), the learned classifier, and the (negative) causal test of adding forward speed |
+| `floor_ckpt_scan.py --glob ... --stride N` | reach rate of many floor checkpoints (not a selection criterion for 20 s standing) |
+| `catch_by_com.py <ckpts> --sets ...` | per-COM-bin catch of stand checkpoints on any hand-off eval set |
+
