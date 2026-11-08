@@ -2,7 +2,7 @@
 
 A 2D MuJoCo ragdoll biped that learns, with PPO (Stable-Baselines3), to get up from lying on its back or face down and stay standing. Split out of [`fightai`](../fightai), the combat self-play league this body was built for.
 
-Details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English summary), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history), [`CLAUDE.md`](CLAUDE.md) (working notes). Checkpoints: [huggingface.co/SungyupKim/standai-getup](https://huggingface.co/SungyupKim/standai-getup).
+Details: [`docs/TECHNICAL_SUMMARY.md`](docs/TECHNICAL_SUMMARY.md) (English summary), [`docs/experiments_2026-10-11.md`](docs/experiments_2026-10-11.md) (Korean, every experiment with its failures), [`docs/stand_only_track.md`](docs/stand_only_track.md) (Korean, full history), [`CLAUDE.md`](CLAUDE.md) (working notes). Checkpoints: [huggingface.co/SungyupKim/standai-getup](https://huggingface.co/SungyupKim/standai-getup). Slides (11 pages): [English](docs/standai_deck_en.pdf), [한국어](docs/standai_deck.pdf).
 
 > ## Result: **~94%** of lying starts are standing 20 s later (0/160 at the start of the project)
 >
